@@ -1,7 +1,11 @@
+import queue
+import threading
+import time
 import unittest
 from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 import google_maps_gui as gui
 
@@ -41,6 +45,16 @@ def make_place(**overrides):
     return gui.crawler.Place(**data)
 
 
+class FakeVar:
+    def __init__(self, value=""):
+        self.value = value
+
+    def get(self):
+        return self.value
+
+    def set(self, value):
+        self.value = value
+
 class GoogleMapsGuiConfigTests(unittest.TestCase):
     def test_build_query_joins_type_keyword_and_location(self):
         self.assertEqual(
@@ -64,6 +78,13 @@ class GoogleMapsGuiConfigTests(unittest.TestCase):
         self.assertEqual(gui.normalize_worker_count("2"), 2)
         self.assertEqual(gui.normalize_worker_count("10"), 3)
         self.assertEqual(gui.normalize_worker_count("abc"), 1)
+
+    def test_job_parallel_count_uses_worker_count_for_multiple_jobs(self):
+        self.assertEqual(gui.job_parallel_count(1, "3"), 1)
+        self.assertEqual(gui.job_parallel_count(2, "3"), 2)
+        self.assertEqual(gui.job_parallel_count(10, "10"), 3)
+        self.assertEqual(gui.job_parallel_count(3, "abc"), 1)
+        self.assertEqual(gui.job_parallel_count(3, "3", test_one=True), 1)
 
     def test_default_output_path_uses_timestamp(self):
         now = datetime(2026, 6, 28, 17, 30, 45)
@@ -145,11 +166,25 @@ class GoogleMapsGuiConfigTests(unittest.TestCase):
         self.assertIn("Du lịch", gui.CATEGORY_PRESETS)
         self.assertIn("Ăn uống", gui.CATEGORY_PRESETS)
         self.assertIn("Cà phê - trà sữa", gui.CATEGORY_PRESETS)
+        self.assertEqual(gui.CATEGORY_PRESET_VALUES[0], "")
+
+    def test_reset_category_preset_clears_multi_types(self):
+        class FakeApp:
+            category_preset_var = FakeVar("Vận tải")
+            multi_types_var = FakeVar("sân bay, ga tàu")
+
+        app = FakeApp()
+
+        gui.GoogleMapsCrawlerApp._reset_category_preset(app)
+
+        self.assertEqual(app.category_preset_var.get(), "")
+        self.assertEqual(app.multi_types_var.get(), "")
 
     def test_location_presets_are_exposed_to_gui(self):
         self.assertIn("Toàn quốc", gui.LOCATION_PRESETS)
         self.assertIn("Du lịch biển", gui.LOCATION_PRESETS)
         self.assertEqual(len(gui.LOCATION_PRESETS["Toàn quốc"]), 34)
+        self.assertEqual(gui.LOCATION_PRESET_VALUES[0], "")
 
     def test_build_jobs_from_inputs_cross_joins_for_queue(self):
         generated = gui.build_jobs_from_inputs(
@@ -192,6 +227,42 @@ class GoogleMapsGuiConfigTests(unittest.TestCase):
         )
 
         self.assertEqual(generated[0].limit, 0)
+
+    def test_manual_query_only_ignores_presets_and_multi_values(self):
+        generated = gui.build_implicit_start_jobs_from_inputs(
+            place_type="baseball",
+            keyword="",
+            location="hà nội",
+            multi_types="sân bay, taxi",
+            multi_locations="Hà Nội, Đà Nẵng",
+            limit=11,
+            query_template="{type} {keyword} {location}",
+            output_template="data/{type}_{location}_{date}.csv",
+            category_preset="Vận tải",
+            location_preset="Toàn quốc",
+            manual_query_only=True,
+        )
+
+        self.assertEqual(len(generated), 1)
+        self.assertEqual(generated[0].query, "baseball hà nội")
+        self.assertEqual(generated[0].limit, 11)
+
+    def test_query_preview_manual_query_only_shows_single_query(self):
+        preview = gui.format_query_preview_for_inputs(
+            place_type="baseball",
+            keyword="",
+            location="hà nội",
+            multi_types="sân bay, taxi",
+            multi_locations="Hà Nội, Đà Nẵng",
+            limit=11,
+            query_template="{type} {keyword} {location}",
+            output_template="data/{type}_{location}_{date}.csv",
+            category_preset="Vận tải",
+            location_preset="Toàn quốc",
+            manual_query_only=True,
+        )
+
+        self.assertEqual(preview, "baseball hà nội")
 
     def test_filter_and_sort_places_for_preview(self):
         places = [
@@ -272,6 +343,70 @@ class GoogleMapsGuiConfigTests(unittest.TestCase):
         gui.GoogleMapsCrawlerApp._start_jobs(app, test_one=False)
 
         self.assertEqual(app.started, (generated_jobs, False))
+
+    def test_clear_data_folder_removes_files_and_keeps_root(self):
+        with TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            nested_dir = data_dir / "screenshots"
+            nested_dir.mkdir(parents=True)
+            (data_dir / "a.csv").write_text("a", encoding="utf-8")
+            (nested_dir / "b.png").write_text("b", encoding="utf-8")
+
+            deleted_count = gui.clear_data_folder(data_dir)
+
+            self.assertEqual(deleted_count, 2)
+            self.assertTrue(data_dir.exists())
+            self.assertEqual(list(data_dir.rglob("*")), [])
+
+    def test_clear_data_folder_creates_missing_root(self):
+        with TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+
+            deleted_count = gui.clear_data_folder(data_dir)
+
+            self.assertEqual(deleted_count, 0)
+            self.assertTrue(data_dir.exists())
+
+    def test_run_worker_runs_multiple_jobs_in_parallel_with_limit(self):
+        active_count = 0
+        max_active_count = 0
+        lock = threading.Lock()
+
+        def fake_run_crawl(options, progress=None, stop_event=None, pause_event=None):
+            nonlocal active_count, max_active_count
+            with lock:
+                active_count += 1
+                max_active_count = max(max_active_count, active_count)
+            time.sleep(0.05)
+            with lock:
+                active_count -= 1
+            return []
+
+        class FakeApp:
+            log_queue = queue.Queue()
+            stop_event = threading.Event()
+            pause_event = threading.Event()
+
+            def _queue_log(self, message):
+                self.log_queue.put(("log", (message, "info")))
+
+            def _run_one_job(self, *args, **kwargs):
+                return gui.GoogleMapsCrawlerApp._run_one_job(self, *args, **kwargs)
+
+        app = FakeApp()
+        job_options = [
+            (
+                gui.jobs.CrawlJob(place_type=f"type {index}", location="Hà Nội", limit=1),
+                gui.crawler.CrawlOptions(query=f"query {index}", limit=1, out=Path(f"data/test_{index}.csv")),
+            )
+            for index in range(4)
+        ]
+
+        with patch.object(gui.crawler, "run_crawl", fake_run_crawl):
+            gui.GoogleMapsCrawlerApp._run_worker(app, job_options, test_one=False, parallel_jobs=2)
+
+        self.assertEqual(max_active_count, 2)
+        self.assertTrue(all(job.status == "done" for job, _ in job_options))
 
     def test_context_menu_formats_preview_rows_for_clipboard(self):
         rows = [

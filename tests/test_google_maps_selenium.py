@@ -215,14 +215,18 @@ class GoogleMapsParserTests(unittest.TestCase):
         self.assertEqual(gm.parse_price_range(""), (None, None))
         self.assertEqual(gm.parse_price_range("100.000-250.000 VND"), (100000, 250000))
         self.assertEqual(gm.parse_price_range("581.532 VND 20-21 thg 7"), (581532, 581532))
-        self.assertEqual(gm.parse_price_range("1-100.000 \u0111"), (1, 100000))
-        self.assertEqual(gm.parse_price_range("1-100.000 \u0111/ng\u01b0\u1eddi"), (1, 100000))
+        self.assertEqual(gm.parse_price_range("1-100.000 \u0111"), (0, 100000))
+        self.assertEqual(gm.parse_price_range("1-100.000 \u0111/ng\u01b0\u1eddi"), (0, 100000))
         self.assertEqual(gm.parse_price_range("100.000 \u0111/ng\u01b0\u1eddi"), (100000, 100000))
         self.assertEqual(gm.parse_price_range("100.000-250.000 ₫"), (100000, 250000))
         self.assertEqual(gm.parse_price_range("581.532 ₫ 20-21 thg 7"), (581532, 581532))
         self.assertEqual(gm.parse_price_range("₫₫"), (200000, 500000))
         self.assertEqual(gm.parse_price_range("4,7 (128)"), (None, None))
         self.assertEqual(gm.parse_price_range("20-21 thg 7"), (None, None))
+
+    def test_parse_price_range_normalizes_google_maps_person_price_floor(self):
+        self.assertEqual(gm.parse_price_range("1-100.000 \u0111/ng\u01b0\u1eddi"), (0, 100000))
+        self.assertEqual(gm.parse_price_range_for_category("1-100.000 \u0111/ng\u01b0\u1eddi", "qu\u00e1n c\u00e0 ph\u00ea"), (0, 100000))
 
     def test_parse_price_range_uses_category_level_fallbacks(self):
         self.assertEqual(gm.parse_price_range_for_category("₫₫", "quán cà phê"), (50_000, 150_000))

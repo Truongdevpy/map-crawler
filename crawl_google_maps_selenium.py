@@ -627,6 +627,14 @@ def parse_price_number(value: str) -> Optional[int]:
     return int(re.sub(r"\D", "", raw)) * multiplier
 
 
+def normalize_price_bounds(low: Optional[int], high: Optional[int]) -> tuple[Optional[int], Optional[int]]:
+    if low is None or high is None:
+        return low, high
+    normalized_low, normalized_high = min(low, high), max(low, high)
+    if 0 < normalized_low < 1_000 and normalized_high >= 10_000:
+        normalized_low = 0
+    return normalized_low, normalized_high
+
 def parse_price_range(text: str) -> tuple[Optional[int], Optional[int]]:
     if not text:
         return None, None
@@ -650,7 +658,7 @@ def parse_price_range(text: str) -> tuple[Optional[int], Optional[int]]:
         low = parse_price_number(range_match.group(1))
         high = parse_price_number(range_match.group(2))
         if low is not None and high is not None:
-            return min(low, high), max(low, high)
+            return normalize_price_bounds(low, high)
 
     currency_matches = re.findall(
         r"(?:₫|vnd|đ)\s*(\d+(?:[\.,]\d+)*)|(\d+(?:[\.,]\d+)*)\s*(?:₫|vnd|đ)",
@@ -662,7 +670,7 @@ def parse_price_range(text: str) -> tuple[Optional[int], Optional[int]]:
         if number is not None
     ]
     if currency_numbers:
-        return min(currency_numbers), max(currency_numbers)
+        return normalize_price_bounds(min(currency_numbers), max(currency_numbers))
 
     number_matches = re.findall(r"\d+(?:[\.,]\d+)*(?:\s*(?:k|nghìn|nghin|tr|triệu|trieu|m))", normalized)
     numbers = [number for number in (parse_price_number(match) for match in number_matches) if number is not None]
@@ -670,7 +678,7 @@ def parse_price_range(text: str) -> tuple[Optional[int], Optional[int]]:
         return None, None
     if len(numbers) == 1:
         return numbers[0], numbers[0]
-    return min(numbers), max(numbers)
+    return normalize_price_bounds(min(numbers), max(numbers))
 
 
 def parse_price_range(text: str) -> tuple[Optional[int], Optional[int]]:
@@ -706,7 +714,7 @@ def parse_price_range(text: str) -> tuple[Optional[int], Optional[int]]:
         low = parse_price_number(range_match.group(1))
         high = parse_price_number(range_match.group(2))
         if low is not None and high is not None:
-            return min(low, high), max(low, high)
+            return normalize_price_bounds(low, high)
 
     currency_matches = re.findall(
         r"(?:â‚«|vnd|\u0111)\s*(\d+(?:[\.,]\d+)*)|(\d+(?:[\.,]\d+)*)\s*(?:â‚«|vnd|\u0111)",
@@ -718,7 +726,7 @@ def parse_price_range(text: str) -> tuple[Optional[int], Optional[int]]:
         if number is not None
     ]
     if currency_numbers:
-        return min(currency_numbers), max(currency_numbers)
+        return normalize_price_bounds(min(currency_numbers), max(currency_numbers))
 
     number_matches = re.findall(
         r"\d+(?:[\.,]\d+)*(?:\s*(?:k|ngh\u00ecn|nghÃ¬n|nghin|tr|tri\u1ec7u|triá»‡u|trieu))",
@@ -729,7 +737,7 @@ def parse_price_range(text: str) -> tuple[Optional[int], Optional[int]]:
         return None, None
     if len(numbers) == 1:
         return numbers[0], numbers[0]
-    return min(numbers), max(numbers)
+    return normalize_price_bounds(min(numbers), max(numbers))
 
 
 def parse_price_range_for_category(text: str, category: str = "") -> tuple[Optional[int], Optional[int]]:

@@ -9,6 +9,7 @@ import queue
 import re
 import threading
 import webbrowser
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -23,10 +24,13 @@ import google_maps_jobs as jobs
 
 APP_TITLE = "Google Maps Destination Crawler"
 SETTINGS_PATH = Path(".google_maps_gui_settings.json")
+DATA_DIR = Path("data")
 PLACE_TYPE_LABEL = "Loại cần lấy (gõ tay hoặc chọn)"
 PLACE_TYPES = jobs.PLACE_TYPES
 CATEGORY_PRESETS = jobs.CATEGORY_PRESETS
 LOCATION_PRESETS = jobs.LOCATION_PRESETS
+CATEGORY_PRESET_VALUES = [""] + list(CATEGORY_PRESETS)
+LOCATION_PRESET_VALUES = [""] + list(LOCATION_PRESETS)
 
 EXPORT_MODE_LABELS = {
     crawler.EXPORT_MODE_END: "Ghi file khi cào xong",
@@ -155,6 +159,11 @@ def normalize_worker_count(value: str) -> int:
     return crawler.normalize_max_workers(worker_count)
 
 
+def job_parallel_count(job_count: int, worker_value: str, test_one: bool = False) -> int:
+    if test_one or int(job_count) <= 1:
+        return 1
+    return min(normalize_worker_count(worker_value), int(job_count))
+
 def default_output_path(now: datetime | None = None, export_format: str = crawler.EXPORT_FORMAT_CSV) -> Path:
     timestamp = (now or datetime.now()).strftime("%Y%m%d_%H%M%S")
     suffix = {
@@ -180,6 +189,46 @@ def write_settings_file(path: Path | str, payload: Mapping[str, Any]) -> None:
     settings_path = Path(path)
     settings_path.parent.mkdir(parents=True, exist_ok=True)
     settings_path.write_text(json.dumps(dict(payload), ensure_ascii=False, indent=2), encoding="utf-8")
+
+def removable_data_files(data_dir: Path | str = DATA_DIR) -> list[Path]:
+    root = Path(data_dir)
+    if not root.exists():
+        return []
+
+    root_resolved = root.resolve()
+    files: list[Path] = []
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        try:
+            path.resolve().relative_to(root_resolved)
+        except ValueError:
+            continue
+        files.append(path)
+    return files
+
+def clear_data_folder(data_dir: Path | str = DATA_DIR) -> int:
+    root = Path(data_dir)
+    if not root.exists():
+        root.mkdir(parents=True, exist_ok=True)
+        return 0
+
+    files = removable_data_files(root)
+    for path in files:
+        path.unlink()
+
+    folders = sorted(
+        (path for path in root.rglob("*") if path.is_dir() and not path.is_symlink()),
+        key=lambda path: len(path.parts),
+        reverse=True,
+    )
+    for folder in folders:
+        try:
+            folder.rmdir()
+        except OSError:
+            pass
+    root.mkdir(parents=True, exist_ok=True)
+    return len(files)
 
 def selected_fields_from_values(values: dict[str, bool]) -> list[str]:
     selected = [field for field in crawler.SCHEMA_FIELDS if values.get(field)]
@@ -293,7 +342,10 @@ def should_use_multi_job_config(
     location_preset: str = "",
     multi_types: str = "",
     multi_locations: str = "",
+    manual_query_only: bool = False,
 ) -> bool:
+    if manual_query_only:
+        return False
     if jobs.categories_for_preset(category_preset):
         return True
     if jobs.resolve_preset_name(location_preset, LOCATION_PRESETS) in LOCATION_PRESETS:
@@ -324,9 +376,10 @@ def build_implicit_start_jobs_from_inputs(
     location_preset: str = "",
     all_results: bool = False,
     limit_override: int | None = None,
+    manual_query_only: bool = False,
 ) -> list[jobs.CrawlJob]:
     effective_limit = limit if limit_override is None else limit_override
-    if not should_use_multi_job_config(category_preset, location_preset, multi_types, multi_locations):
+    if not should_use_multi_job_config(category_preset, location_preset, multi_types, multi_locations, manual_query_only):
         return [
             jobs.CrawlJob(
                 place_type=place_type.strip(),
@@ -364,8 +417,9 @@ def format_query_preview_for_inputs(
     category_preset: str = "",
     location_preset: str = "",
     all_results: bool = False,
+    manual_query_only: bool = False,
 ) -> str:
-    if should_use_multi_job_config(category_preset, location_preset, multi_types, multi_locations):
+    if should_use_multi_job_config(category_preset, location_preset, multi_types, multi_locations, manual_query_only):
         crawl_jobs = build_implicit_start_jobs_from_inputs(
             place_type=place_type,
             keyword=keyword,
@@ -380,6 +434,7 @@ def format_query_preview_for_inputs(
             category_preset=category_preset,
             location_preset=location_preset,
             all_results=all_results,
+            manual_query_only=manual_query_only,
         )
         sample = " | ".join(job.query for job in crawl_jobs[:3])
         more = "" if len(crawl_jobs) <= 3 else f" | ... (+{len(crawl_jobs) - 3} job)"
@@ -531,6 +586,7 @@ class GoogleMapsCrawlerApp:
         self.dedupe_mode_var = tk.StringVar(value=label_for_value(DEDUPE_LABELS, "destination_id"))
         self.resume_var = tk.BooleanVar(value=True)
         self.headless_var = tk.BooleanVar(value=False)
+        self.manual_query_only_var = tk.BooleanVar(value=False)
         self.status_var = tk.StringVar(value="Sẵn sàng")
         self.settings_path_var = tk.StringVar(value=str(SETTINGS_PATH.resolve()))
         self.settings_status_var = tk.StringVar(value="Tự lưu khi đóng app")
@@ -608,6 +664,7 @@ class GoogleMapsCrawlerApp:
             ("Chạy lại job lỗi", self._retry_failed_jobs),
             ("Xóa job", self._remove_selected_jobs),
             ("Xóa tất cả", self._clear_jobs),
+            ("Xóa dữ liệu data", self._confirm_clear_data_folder),
         ]
         for index, (text, command) in enumerate(buttons):
             ttk.Button(actions, text=text, command=command).grid(row=0, column=index, padx=(0, 8))
@@ -662,14 +719,18 @@ class GoogleMapsCrawlerApp:
         ttk.Entry(parent, textvariable=self.multi_locations_var).grid(row=3, column=3, sticky="ew", padx=(8, 0), pady=5)
 
         self._add_label(parent, "Preset danh mục", 4, 0)
-        preset_box = ttk.Combobox(parent, textvariable=self.category_preset_var, values=list(CATEGORY_PRESETS), state="readonly")
+        preset_box = ttk.Combobox(parent, textvariable=self.category_preset_var, values=CATEGORY_PRESET_VALUES, state="readonly")
         preset_box.grid(row=4, column=1, sticky="ew", padx=(8, 18), pady=5)
+        preset_box.bind("<<ComboboxSelected>>", lambda *_: self._reset_category_preset() if not self.category_preset_var.get().strip() else None)
         ttk.Button(parent, text="Áp dụng preset", command=self._apply_category_preset).grid(row=4, column=2, sticky="ew", padx=(0, 8), pady=5)
+        ttk.Button(parent, text="Reset danh mục", command=self._reset_category_preset).grid(row=4, column=3, sticky="ew", padx=(0, 0), pady=5)
 
         self._add_label(parent, "Preset vùng", 5, 0)
-        location_preset_box = ttk.Combobox(parent, textvariable=self.location_preset_var, values=[""] + list(LOCATION_PRESETS), state="readonly")
+        location_preset_box = ttk.Combobox(parent, textvariable=self.location_preset_var, values=LOCATION_PRESET_VALUES, state="readonly")
         location_preset_box.grid(row=5, column=1, sticky="ew", padx=(8, 18), pady=5)
+        location_preset_box.bind("<<ComboboxSelected>>", lambda *_: self._reset_location_preset() if not self.location_preset_var.get().strip() else None)
         ttk.Button(parent, text="Áp dụng vùng", command=self._apply_location_preset).grid(row=5, column=2, sticky="ew", padx=(0, 8), pady=5)
+        ttk.Button(parent, text="Reset vùng", command=self._reset_location_preset).grid(row=5, column=3, sticky="ew", padx=(0, 0), pady=5)
 
         self._add_label(parent, "Exclude keywords", 6, 0)
         ttk.Entry(parent, textvariable=self.exclude_keywords_var).grid(row=6, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=5)
@@ -700,6 +761,7 @@ class GoogleMapsCrawlerApp:
         flags.grid(row=11, column=2, columnspan=2, sticky="w", padx=(8, 0), pady=5)
         ttk.Checkbutton(flags, text="Chạy tiếp từ file/checkpoint", variable=self.resume_var).grid(row=0, column=0, padx=(0, 18))
         ttk.Checkbutton(flags, text="Chạy ẩn Chrome", variable=self.headless_var).grid(row=0, column=1)
+        ttk.Checkbutton(flags, text="Chỉ tạo 1 job theo ô gõ tay", variable=self.manual_query_only_var).grid(row=0, column=2, padx=(18, 0))
 
         timing = ttk.LabelFrame(parent, text="Độ trễ / thời gian chờ / số luồng", padding=10)
         timing.grid(row=12, column=0, columnspan=4, sticky="ew", pady=(12, 0))
@@ -728,6 +790,7 @@ class GoogleMapsCrawlerApp:
             self.output_template_var,
             self.export_format_var,
             self.all_results_var,
+            self.manual_query_only_var,
         ):
             var.trace_add("write", lambda *_: self._refresh_query_preview())
 
@@ -1070,6 +1133,9 @@ class GoogleMapsCrawlerApp:
 
     def _apply_category_preset(self) -> None:
         preset = self.category_preset_var.get()
+        if not preset.strip():
+            self._reset_category_preset()
+            return
         categories = jobs.categories_for_preset(preset)
         resolved = jobs.resolve_preset_name(preset, CATEGORY_PRESETS)
         if categories:
@@ -1077,7 +1143,14 @@ class GoogleMapsCrawlerApp:
             self.multi_types_var.set(", ".join(categories))
             self.place_type_var.set(categories[0])
 
+    def _reset_category_preset(self) -> None:
+        self.category_preset_var.set("")
+        self.multi_types_var.set("")
+
     def _apply_location_preset(self) -> None:
+        if not self.location_preset_var.get().strip():
+            self._reset_location_preset()
+            return
         locations = jobs.locations_for_preset(self.location_preset_var.get(), self.multi_locations_var.get())
         if locations:
             resolved = jobs.resolve_preset_name(self.location_preset_var.get(), LOCATION_PRESETS)
@@ -1086,6 +1159,10 @@ class GoogleMapsCrawlerApp:
             self.multi_locations_var.set(", ".join(locations))
             self.location_var.set(locations[0])
             self._append_log(f"Đã áp dụng vùng {self.location_preset_var.get()}: {len(locations)} vị trí.", "info")
+
+    def _reset_location_preset(self) -> None:
+        self.location_preset_var.set("")
+        self.multi_locations_var.set("")
 
     def _refresh_query_preview(self) -> None:
         try:
@@ -1104,6 +1181,7 @@ class GoogleMapsCrawlerApp:
                 category_preset=self.category_preset_var.get(),
                 location_preset=self.location_preset_var.get(),
                 all_results=self.all_results_var.get(),
+                manual_query_only=self.manual_query_only_var.get(),
             )
         except ValueError as exc:
             preview = f"Cấu hình chưa hợp lệ: {exc}"
@@ -1165,6 +1243,7 @@ class GoogleMapsCrawlerApp:
             location_preset=self.location_preset_var.get(),
             all_results=self.all_results_var.get(),
             limit_override=limit_override,
+            manual_query_only=self.manual_query_only_var.get(),
         )
         exclude_keywords = jobs.split_multi_value(self.exclude_keywords_var.get())
         for job in crawl_jobs:
@@ -1180,21 +1259,24 @@ class GoogleMapsCrawlerApp:
 
     def _generate_jobs(self) -> None:
         try:
-            generated = build_jobs_from_inputs(
-                place_types=place_types_for_start(
-                    self.place_type_var.get(),
-                    self.multi_types_var.get(),
-                    self.category_preset_var.get(),
-                ),
-                keywords=self.keyword_var.get(),
-                locations=locations_for_start(self.location_var.get(), self.multi_locations_var.get()),
-                limit=parse_limit_for_mode(self.limit_var.get(), "Số lượng", self.all_results_var.get()),
-                query_template=self.query_template_var.get(),
-                output_template=self.output_template_var.get(),
-                export_format=export_format_value(self.export_format_var.get()),
-                location_preset=self.location_preset_var.get(),
-                all_results=self.all_results_var.get(),
-            )
+            if self.manual_query_only_var.get():
+                generated = [self._single_job_from_config()]
+            else:
+                generated = build_jobs_from_inputs(
+                    place_types=place_types_for_start(
+                        self.place_type_var.get(),
+                        self.multi_types_var.get(),
+                        self.category_preset_var.get(),
+                    ),
+                    keywords=self.keyword_var.get(),
+                    locations=locations_for_start(self.location_var.get(), self.multi_locations_var.get()),
+                    limit=parse_limit_for_mode(self.limit_var.get(), "Số lượng", self.all_results_var.get()),
+                    query_template=self.query_template_var.get(),
+                    output_template=self.output_template_var.get(),
+                    export_format=export_format_value(self.export_format_var.get()),
+                    location_preset=self.location_preset_var.get(),
+                    all_results=self.all_results_var.get(),
+                )
         except ValueError as exc:
             messagebox.showerror("Không tạo được job", str(exc))
             return
@@ -1256,6 +1338,27 @@ class GoogleMapsCrawlerApp:
     def _clear_jobs(self) -> None:
         self.job_queue.clear()
         self._refresh_job_tree()
+
+    def _confirm_clear_data_folder(self) -> None:
+        files = removable_data_files(DATA_DIR)
+        if not files:
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            messagebox.showinfo("Không có dữ liệu", "Thư mục data đang trống.")
+            return
+        answer = messagebox.askyesno(
+            "Xóa dữ liệu data",
+            f"Có chắc chắn muốn xóa {len(files)} file trong thư mục data không?",
+        )
+        if not answer:
+            self._append_log("Đã hủy xóa dữ liệu trong thư mục data.", "info")
+            return
+        try:
+            deleted_count = clear_data_folder(DATA_DIR)
+        except Exception as exc:
+            messagebox.showerror("Xóa dữ liệu lỗi", str(exc))
+            return
+        self._append_log(f"Đã xóa {deleted_count} file trong thư mục data.", "warning")
+        messagebox.showinfo("Đã xóa dữ liệu", f"Đã xóa {deleted_count} file trong thư mục data.")
 
     def _refresh_job_tree(self) -> None:
         if not hasattr(self, "job_tree"):
@@ -1319,6 +1422,11 @@ class GoogleMapsCrawlerApp:
             messagebox.showerror("Cấu hình chưa hợp lệ", str(exc))
             return
 
+        parallel_jobs = job_parallel_count(len(job_options), self.worker_count_var.get(), test_one)
+        if parallel_jobs > 1:
+            for _, options in job_options:
+                options.max_workers = 1
+
         self.log_text.delete("1.0", "end")
         self._clear_preview()
         self.preview_places = []
@@ -1327,7 +1435,7 @@ class GoogleMapsCrawlerApp:
         self.stop_event = threading.Event()
         self.pause_event.clear()
         self._set_running(True)
-        self.worker_thread = threading.Thread(target=self._run_worker, args=(job_options, test_one), daemon=True)
+        self.worker_thread = threading.Thread(target=self._run_worker, args=(job_options, test_one, parallel_jobs), daemon=True)
         self.worker_thread.start()
 
     def _pause(self) -> None:
@@ -1350,26 +1458,70 @@ class GoogleMapsCrawlerApp:
             self.status_var.set("Đang dừng...")
             self._append_log("Đã yêu cầu dừng. Chrome sẽ đóng sau bước hiện tại.", "warning")
 
-    def _run_worker(self, job_options: list[tuple[jobs.CrawlJob, crawler.CrawlOptions]], test_one: bool) -> None:
+    def _run_one_job(
+        self,
+        index: int,
+        total: int,
+        job: jobs.CrawlJob,
+        options: crawler.CrawlOptions,
+        all_places: list[crawler.Place],
+        places_lock: threading.Lock,
+    ) -> tuple[int, list[crawler.Place]]:
+        if self.stop_event and self.stop_event.is_set():
+            return index, []
+
+        job.status = "running"
+        self.log_queue.put(("job_update", None))
+        self.log_queue.put(("log", (f"Job {index}/{total} - Câu tìm kiếm: {options.query}", "info")))
+        self.log_queue.put(("log", (f"File xuất: {options.out}", "info")))
+        places = crawler.run_crawl(options, progress=self._queue_log, stop_event=self.stop_event, pause_event=self.pause_event)
+        job.status = "done"
+        job.done = len(places)
+        job.saved = len(places)
+        with places_lock:
+            all_places.extend(places)
+            preview_places = all_places[:]
+        self.log_queue.put(("preview", (preview_places, options.output_fields or crawler.SCHEMA_FIELDS)))
+        self.log_queue.put(("job_update", None))
+        return index, places
+
+    def _run_worker(self, job_options: list[tuple[jobs.CrawlJob, crawler.CrawlOptions]], test_one: bool, parallel_jobs: int = 1) -> None:
         all_places: list[crawler.Place] = []
+        places_lock = threading.Lock()
+        failed_jobs = 0
         try:
-            for index, (job, options) in enumerate(job_options, start=1):
-                if self.stop_event and self.stop_event.is_set():
-                    break
-                job.status = "running"
-                self.log_queue.put(("job_update", None))
-                self.log_queue.put(("log", (f"Job {index}/{len(job_options)} - Câu tìm kiếm: {options.query}", "info")))
-                self.log_queue.put(("log", (f"File xuất: {options.out}", "info")))
-                places = crawler.run_crawl(options, progress=self._queue_log, stop_event=self.stop_event, pause_event=self.pause_event)
-                job.status = "done"
-                job.done = len(places)
-                job.saved = len(places)
-                all_places.extend(places)
-                self.log_queue.put(("preview", (all_places[:], options.output_fields or crawler.SCHEMA_FIELDS)))
-                self.log_queue.put(("job_update", None))
-                if test_one:
-                    break
-            self.log_queue.put(("done", f"Hoàn tất. Đã lưu {len(all_places)} dòng."))
+            total = len(job_options)
+            if parallel_jobs > 1:
+                self.log_queue.put(("log", (f"Chạy song song {parallel_jobs} job, mỗi job dùng 1 Chrome.", "info")))
+                with ThreadPoolExecutor(max_workers=parallel_jobs) as executor:
+                    futures = {
+                        executor.submit(self._run_one_job, index, total, job, options, all_places, places_lock): (job, index)
+                        for index, (job, options) in enumerate(job_options, start=1)
+                    }
+                    for future in as_completed(futures):
+                        job, index = futures[future]
+                        try:
+                            future.result()
+                        except Exception as exc:
+                            failed_jobs += 1
+                            job.status = "error"
+                            job.failed += 1
+                            self.log_queue.put(("job_update", None))
+                            self.log_queue.put(("log", (f"Job {index}/{total} lỗi: {exc}", "error")))
+            else:
+                for index, (job, options) in enumerate(job_options, start=1):
+                    try:
+                        self._run_one_job(index, len(job_options), job, options, all_places, places_lock)
+                    except Exception as exc:
+                        failed_jobs += 1
+                        job.status = "error"
+                        job.failed += 1
+                        self.log_queue.put(("job_update", None))
+                        self.log_queue.put(("log", (f"Job {index}/{len(job_options)} lỗi: {exc}", "error")))
+                    if test_one or (self.stop_event and self.stop_event.is_set()):
+                        break
+            suffix = "" if failed_jobs == 0 else f" Có {failed_jobs} job lỗi."
+            self.log_queue.put(("done", f"Hoàn tất. Đã lưu {len(all_places)} dòng.{suffix}"))
         except Exception as exc:
             for job, _ in job_options:
                 if job.status == "running":
@@ -1487,6 +1639,7 @@ class GoogleMapsCrawlerApp:
             "dedupe_mode": dedupe_mode_value(self.dedupe_mode_var.get()),
             "resume": self.resume_var.get(),
             "headless": self.headless_var.get(),
+            "manual_query_only": self.manual_query_only_var.get(),
             "fields": {field: variable.get() for field, variable in self.field_vars.items()},
         }
         if include_jobs:
@@ -1538,6 +1691,8 @@ class GoogleMapsCrawlerApp:
             self.resume_var.set(bool(settings["resume"]))
         if "headless" in settings:
             self.headless_var.set(bool(settings["headless"]))
+        if "manual_query_only" in settings:
+            self.manual_query_only_var.set(bool(settings["manual_query_only"]))
         if "all_results" in settings:
             self.all_results_var.set(bool(settings["all_results"]))
         for field, selected in dict(settings.get("fields", {})).items():
