@@ -12,7 +12,7 @@ import webbrowser
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 from urllib.parse import quote_plus
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -165,6 +165,21 @@ def default_output_path(now: datetime | None = None, export_format: str = crawle
     }.get(export_format, ".csv")
     return Path(f"data/google_maps_{timestamp}{suffix}")
 
+
+def read_settings_file(path: Path | str = SETTINGS_PATH) -> dict[str, Any]:
+    settings_path = Path(path)
+    if not settings_path.exists():
+        return {}
+    try:
+        payload = json.loads(settings_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+def write_settings_file(path: Path | str, payload: Mapping[str, Any]) -> None:
+    settings_path = Path(path)
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings_path.write_text(json.dumps(dict(payload), ensure_ascii=False, indent=2), encoding="utf-8")
 
 def selected_fields_from_values(values: dict[str, bool]) -> list[str]:
     selected = [field for field in crawler.SCHEMA_FIELDS if values.get(field)]
@@ -517,6 +532,8 @@ class GoogleMapsCrawlerApp:
         self.resume_var = tk.BooleanVar(value=True)
         self.headless_var = tk.BooleanVar(value=False)
         self.status_var = tk.StringVar(value="Sẵn sàng")
+        self.settings_path_var = tk.StringVar(value=str(SETTINGS_PATH.resolve()))
+        self.settings_status_var = tk.StringVar(value="Tự lưu khi đóng app")
         self.progress_text_var = tk.StringVar(value="0/0")
         self.progress_value_var = tk.DoubleVar(value=0)
         self.rating_filter_var = tk.StringVar()
@@ -714,12 +731,22 @@ class GoogleMapsCrawlerApp:
         ):
             var.trace_add("write", lambda *_: self._refresh_query_preview())
 
+        settings_frame = ttk.LabelFrame(parent, text="Lưu cấu hình", padding=10)
+        settings_frame.grid(row=14, column=0, columnspan=4, sticky="ew", pady=(12, 0))
+        settings_frame.columnconfigure(1, weight=1)
+        ttk.Label(settings_frame, text="File cấu hình").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        ttk.Entry(settings_frame, textvariable=self.settings_path_var, state="readonly").grid(row=0, column=1, sticky="ew", padx=(0, 8))
+        ttk.Button(settings_frame, text="Lưu cấu hình", command=self._save_settings_now).grid(row=0, column=2, padx=(0, 8))
+        ttk.Button(settings_frame, text="Tải cấu hình", command=self._load_settings_now).grid(row=0, column=3, padx=(0, 8))
+        ttk.Button(settings_frame, text="Mở thư mục", command=self._open_settings_folder).grid(row=0, column=4)
+        ttk.Label(settings_frame, textvariable=self.settings_status_var).grid(row=1, column=1, columnspan=4, sticky="w", pady=(6, 0))
+
         note = ttk.Label(
             parent,
             text="Tool không thêm proxy, stealth hay bypass CAPTCHA. Nếu Google chặn, hãy tăng delay, giảm luồng hoặc dùng Places API chính thức.",
             wraplength=980,
         )
-        note.grid(row=14, column=0, columnspan=4, sticky="ew", pady=(14, 0))
+        note.grid(row=15, column=0, columnspan=4, sticky="ew", pady=(14, 0))
 
     def _build_fields_tab(self, parent: ttk.Frame) -> None:
         parent.columnconfigure(0, weight=1)
@@ -1518,12 +1545,12 @@ class GoogleMapsCrawlerApp:
                 self.field_vars[field].set(bool(selected))
 
     def _load_settings(self) -> None:
-        if not SETTINGS_PATH.exists():
+        payload = read_settings_file(SETTINGS_PATH)
+        if not payload:
             return
-        try:
-            payload = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
-        except Exception:
-            return
+        self._apply_loaded_settings_payload(payload)
+
+    def _apply_loaded_settings_payload(self, payload: dict[str, Any]) -> None:
         self._apply_settings(payload)
         loaded_jobs = []
         for item in payload.get("jobs", []):
@@ -1545,7 +1572,39 @@ class GoogleMapsCrawlerApp:
         self.job_queue = loaded_jobs
 
     def _save_settings(self) -> None:
-        SETTINGS_PATH.write_text(json.dumps(self._settings_payload(), ensure_ascii=False, indent=2), encoding="utf-8")
+        write_settings_file(SETTINGS_PATH, self._settings_payload())
+
+    def _save_settings_now(self) -> None:
+        try:
+            self._save_settings()
+        except Exception as exc:
+            messagebox.showerror("Lưu cấu hình lỗi", str(exc))
+            return
+        message = f"Đã lưu cấu hình: {SETTINGS_PATH.resolve()}"
+        self.settings_status_var.set(f"Đã lưu lúc {datetime.now().strftime('%H:%M:%S')}")
+        self._append_log(message, "success")
+
+    def _load_settings_now(self) -> None:
+        if not SETTINGS_PATH.exists():
+            messagebox.showinfo("Chưa có cấu hình", f"Chưa có file settings: {SETTINGS_PATH.resolve()}")
+            return
+        payload = read_settings_file(SETTINGS_PATH)
+        if not payload:
+            messagebox.showwarning("Không tải được cấu hình", "File settings trống hoặc không phải JSON hợp lệ.")
+            return
+        try:
+            self._apply_loaded_settings_payload(payload)
+        except Exception as exc:
+            messagebox.showerror("Tải cấu hình lỗi", str(exc))
+            return
+        self._refresh_limit_state()
+        self._refresh_query_preview()
+        self._refresh_job_tree()
+        self.settings_status_var.set(f"Đã tải lúc {datetime.now().strftime('%H:%M:%S')}")
+        self._append_log(f"Đã tải cấu hình: {SETTINGS_PATH.resolve()}", "success")
+
+    def _open_settings_folder(self) -> None:
+        webbrowser.open(str(SETTINGS_PATH.resolve().parent))
 
     def _on_close(self) -> None:
         try:

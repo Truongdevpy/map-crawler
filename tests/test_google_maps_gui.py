@@ -1,6 +1,7 @@
 import unittest
 from datetime import datetime
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import google_maps_gui as gui
 
@@ -70,6 +71,29 @@ class GoogleMapsGuiConfigTests(unittest.TestCase):
             gui.default_output_path(now),
             Path("data/google_maps_20260628_173045.csv"),
         )
+
+    def test_settings_file_round_trip_preserves_vietnamese_text(self):
+        payload = {
+            "place_type": "khách sạn",
+            "location": "Đà Nẵng",
+            "jobs": [{"place_type": "quán cà phê", "location": "Hà Nội"}],
+        }
+        with TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "settings.json"
+
+            gui.write_settings_file(path, payload)
+
+            self.assertEqual(gui.read_settings_file(path), payload)
+            self.assertIn("khách sạn", path.read_text(encoding="utf-8"))
+
+    def test_read_settings_file_returns_empty_dict_for_missing_or_invalid_file(self):
+        with TemporaryDirectory() as tmp_dir:
+            missing_path = Path(tmp_dir) / "missing.json"
+            invalid_path = Path(tmp_dir) / "invalid.json"
+            invalid_path.write_text("{bad json", encoding="utf-8")
+
+            self.assertEqual(gui.read_settings_file(missing_path), {})
+            self.assertEqual(gui.read_settings_file(invalid_path), {})
 
     def test_parse_limit_for_all_results_ignores_number_field(self):
         self.assertEqual(gui.parse_limit_for_mode("abc", "Số lượng", all_results=True), 0)
