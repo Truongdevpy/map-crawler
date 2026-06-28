@@ -273,6 +273,106 @@ def filter_places(
     return filtered
 
 
+def should_use_multi_job_config(
+    category_preset: str = "",
+    location_preset: str = "",
+    multi_types: str = "",
+    multi_locations: str = "",
+) -> bool:
+    if jobs.categories_for_preset(category_preset):
+        return True
+    if jobs.resolve_preset_name(location_preset, LOCATION_PRESETS) in LOCATION_PRESETS:
+        return True
+    return len(jobs.split_multi_value(multi_types)) > 1 or len(jobs.split_multi_value(multi_locations)) > 1
+
+def place_types_for_start(place_type: str, multi_types: str, category_preset: str = "") -> str:
+    preset_types = jobs.categories_for_preset(category_preset)
+    if preset_types:
+        return ", ".join(preset_types)
+    return multi_types.strip() or place_type.strip()
+
+def locations_for_start(location: str, multi_locations: str) -> str:
+    return multi_locations.strip() or location.strip()
+
+def build_implicit_start_jobs_from_inputs(
+    place_type: str,
+    keyword: str,
+    location: str,
+    multi_types: str,
+    multi_locations: str,
+    limit: int,
+    query_template: str,
+    output: str = "",
+    output_template: str = "",
+    export_format: str = crawler.EXPORT_FORMAT_CSV,
+    category_preset: str = "",
+    location_preset: str = "",
+    all_results: bool = False,
+    limit_override: int | None = None,
+) -> list[jobs.CrawlJob]:
+    effective_limit = limit if limit_override is None else limit_override
+    if not should_use_multi_job_config(category_preset, location_preset, multi_types, multi_locations):
+        return [
+            jobs.CrawlJob(
+                place_type=place_type.strip(),
+                keyword=keyword.strip(),
+                location=location.strip(),
+                limit=effective_limit,
+                output=output.strip(),
+                query_template=query_template.strip() or jobs.QUERY_TEMPLATE,
+            )
+        ]
+
+    return build_jobs_from_inputs(
+        place_types=place_types_for_start(place_type, multi_types, category_preset),
+        keywords=keyword,
+        locations=locations_for_start(location, multi_locations),
+        limit=effective_limit,
+        query_template=query_template,
+        output_template=output_template,
+        export_format=export_format,
+        location_preset=location_preset,
+        all_results=all_results and limit_override is None,
+    )
+
+def format_query_preview_for_inputs(
+    place_type: str,
+    keyword: str,
+    location: str,
+    multi_types: str,
+    multi_locations: str,
+    limit: int,
+    query_template: str,
+    output: str = "",
+    output_template: str = "",
+    export_format: str = crawler.EXPORT_FORMAT_CSV,
+    category_preset: str = "",
+    location_preset: str = "",
+    all_results: bool = False,
+) -> str:
+    if should_use_multi_job_config(category_preset, location_preset, multi_types, multi_locations):
+        crawl_jobs = build_implicit_start_jobs_from_inputs(
+            place_type=place_type,
+            keyword=keyword,
+            location=location,
+            multi_types=multi_types,
+            multi_locations=multi_locations,
+            limit=limit,
+            query_template=query_template,
+            output=output,
+            output_template=output_template,
+            export_format=export_format,
+            category_preset=category_preset,
+            location_preset=location_preset,
+            all_results=all_results,
+        )
+        sample = " | ".join(job.query for job in crawl_jobs[:3])
+        more = "" if len(crawl_jobs) <= 3 else f" | ... (+{len(crawl_jobs) - 3} job)"
+        return f"Sẽ tạo {len(crawl_jobs)} job. Ví dụ: {sample}{more}"
+
+    query = build_query(place_type, keyword, location, query_template)
+    return query or "Nhập ít nhất một loại, từ khóa hoặc vị trí."
+
 def place_to_context_row(place: crawler.Place, fields: Iterable[str] | None = None) -> dict[str, Any]:
     row = asdict(place)
     selected_fields = list(fields or row.keys())
@@ -598,7 +698,20 @@ class GoogleMapsCrawlerApp:
         query_frame.columnconfigure(0, weight=1)
         self.query_preview = ttk.Label(query_frame, text="", anchor="w")
         self.query_preview.grid(row=0, column=0, sticky="ew")
-        for var in (self.place_type_var, self.keyword_var, self.location_var, self.query_template_var):
+        for var in (
+            self.place_type_var,
+            self.keyword_var,
+            self.location_var,
+            self.query_template_var,
+            self.multi_types_var,
+            self.multi_locations_var,
+            self.category_preset_var,
+            self.location_preset_var,
+            self.limit_var,
+            self.output_template_var,
+            self.export_format_var,
+            self.all_results_var,
+        ):
             var.trace_add("write", lambda *_: self._refresh_query_preview())
 
         note = ttk.Label(
@@ -948,8 +1061,26 @@ class GoogleMapsCrawlerApp:
             self._append_log(f"Đã áp dụng vùng {self.location_preset_var.get()}: {len(locations)} vị trí.", "info")
 
     def _refresh_query_preview(self) -> None:
-        query = build_query(self.place_type_var.get(), self.keyword_var.get(), self.location_var.get(), self.query_template_var.get())
-        self.query_preview.configure(text=query or "Nhập ít nhất một loại, từ khóa hoặc vị trí.")
+        try:
+            limit = parse_limit_for_mode(self.limit_var.get(), "Số lượng", self.all_results_var.get())
+            preview = format_query_preview_for_inputs(
+                place_type=self.place_type_var.get(),
+                keyword=self.keyword_var.get(),
+                location=self.location_var.get(),
+                multi_types=self.multi_types_var.get(),
+                multi_locations=self.multi_locations_var.get(),
+                limit=limit,
+                query_template=self.query_template_var.get(),
+                output=self.output_var.get(),
+                output_template=self.output_template_var.get(),
+                export_format=export_format_value(self.export_format_var.get()),
+                category_preset=self.category_preset_var.get(),
+                location_preset=self.location_preset_var.get(),
+                all_results=self.all_results_var.get(),
+            )
+        except ValueError as exc:
+            preview = f"Cấu hình chưa hợp lệ: {exc}"
+        self.query_preview.configure(text=preview)
 
     def _choose_output(self) -> None:
         path = filedialog.asksaveasfilename(
@@ -990,6 +1121,29 @@ class GoogleMapsCrawlerApp:
             exclude_keywords=jobs.split_multi_value(self.exclude_keywords_var.get()),
         )
 
+    def _implicit_jobs_from_config(self, limit_override: int | None = None) -> list[jobs.CrawlJob]:
+        limit = parse_limit_for_mode(self.limit_var.get(), "Số lượng", self.all_results_var.get())
+        crawl_jobs = build_implicit_start_jobs_from_inputs(
+            place_type=self.place_type_var.get(),
+            keyword=self.keyword_var.get(),
+            location=self.location_var.get(),
+            multi_types=self.multi_types_var.get(),
+            multi_locations=self.multi_locations_var.get(),
+            limit=limit,
+            query_template=self.query_template_var.get(),
+            output=self.output_var.get(),
+            output_template=self.output_template_var.get(),
+            export_format=export_format_value(self.export_format_var.get()),
+            category_preset=self.category_preset_var.get(),
+            location_preset=self.location_preset_var.get(),
+            all_results=self.all_results_var.get(),
+            limit_override=limit_override,
+        )
+        exclude_keywords = jobs.split_multi_value(self.exclude_keywords_var.get())
+        for job in crawl_jobs:
+            job.exclude_keywords = exclude_keywords
+        return crawl_jobs
+
     def _add_single_job(self) -> None:
         try:
             self.job_queue.append(self._single_job_from_config())
@@ -1000,9 +1154,13 @@ class GoogleMapsCrawlerApp:
     def _generate_jobs(self) -> None:
         try:
             generated = build_jobs_from_inputs(
-                place_types=self.multi_types_var.get() or self.place_type_var.get(),
+                place_types=place_types_for_start(
+                    self.place_type_var.get(),
+                    self.multi_types_var.get(),
+                    self.category_preset_var.get(),
+                ),
                 keywords=self.keyword_var.get(),
-                locations=self.multi_locations_var.get() or self.location_var.get(),
+                locations=locations_for_start(self.location_var.get(), self.multi_locations_var.get()),
                 limit=parse_limit_for_mode(self.limit_var.get(), "Số lượng", self.all_results_var.get()),
                 query_template=self.query_template_var.get(),
                 output_template=self.output_template_var.get(),
@@ -1115,7 +1273,7 @@ class GoogleMapsCrawlerApp:
 
     def _start_jobs(self, test_one: bool) -> None:
         try:
-            crawl_jobs = [self._single_job_from_config(limit_override=1)] if test_one else (self.job_queue[:] or [self._single_job_from_config()])
+            crawl_jobs = [self._single_job_from_config(limit_override=1)] if test_one else (self.job_queue[:] or self._implicit_jobs_from_config())
         except ValueError as exc:
             messagebox.showerror("Cấu hình chưa hợp lệ", str(exc))
             return

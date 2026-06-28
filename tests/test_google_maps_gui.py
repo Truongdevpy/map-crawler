@@ -182,6 +182,73 @@ class GoogleMapsGuiConfigTests(unittest.TestCase):
         self.assertEqual([place.name for place in sorted_rows], ["C", "A"])
 
 
+    def test_start_jobs_from_presets_expand_all_types_and_locations(self):
+        generated = gui.build_implicit_start_jobs_from_inputs(
+            place_type="chợ",
+            keyword="",
+            location="Hà Nội",
+            multi_types="chợ",
+            multi_locations="Hà Nội",
+            limit=20,
+            query_template="{type} {keyword} {location}",
+            output_template="data/{type}_{location}_{date}.csv",
+            category_preset="Mua sắm",
+            location_preset="Toàn quốc",
+        )
+
+        queries = {job.query for job in generated}
+
+        self.assertEqual(len(generated), len(gui.CATEGORY_PRESETS["Mua sắm"]) * len(gui.LOCATION_PRESETS["Toàn quốc"]))
+        self.assertIn("chợ Hà Nội", queries)
+        self.assertIn("trung tâm thương mại Hà Nội", queries)
+        self.assertIn("siêu thị Hà Nội", queries)
+        self.assertIn("nhà sách Hà Nội", queries)
+        self.assertGreater(len({job.place_type for job in generated}), 1)
+
+    def test_query_preview_explains_multi_job_preset(self):
+        preview = gui.format_query_preview_for_inputs(
+            place_type="chợ",
+            keyword="",
+            location="Hà Nội",
+            multi_types="chợ",
+            multi_locations="Hà Nội",
+            limit=20,
+            query_template="{type} {keyword} {location}",
+            output_template="data/{type}_{location}_{date}.csv",
+            category_preset="Mua sắm",
+            location_preset="Toàn quốc",
+        )
+
+        self.assertIn("Sẽ tạo", preview)
+        self.assertIn("job", preview)
+        self.assertIn("chợ Hà Nội", preview)
+        self.assertNotEqual(preview, "chợ Hà Nội")
+
+    def test_start_queue_without_saved_jobs_uses_implicit_preset_jobs(self):
+        generated_jobs = [
+            gui.jobs.CrawlJob(place_type="chợ", location="Hà Nội", limit=20),
+            gui.jobs.CrawlJob(place_type="siêu thị", location="Đà Nẵng", limit=20),
+        ]
+
+        class FakeApp:
+            job_queue = []
+            started = None
+
+            def _single_job_from_config(self, limit_override=None):
+                raise AssertionError("Start Queue must not collapse presets into one single job")
+
+            def _implicit_jobs_from_config(self, limit_override=None):
+                return generated_jobs
+
+            def _start_job_list(self, crawl_jobs, test_one=False):
+                self.started = (crawl_jobs, test_one)
+
+        app = FakeApp()
+
+        gui.GoogleMapsCrawlerApp._start_jobs(app, test_one=False)
+
+        self.assertEqual(app.started, (generated_jobs, False))
+
     def test_context_menu_formats_preview_rows_for_clipboard(self):
         rows = [
             gui.place_to_context_row(make_place(name="A", rating=4.8), ["name", "rating", "maps_url"]),
