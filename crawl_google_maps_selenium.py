@@ -272,6 +272,15 @@ DETAIL_VALUE_ATTRS = (
     "style",
 )
 
+BROAD_SELECTOR_MAX_ELEMENTS = 80
+BROAD_DETAIL_SELECTORS = {
+    "button[aria-label], div[aria-label], span[aria-label], a[aria-label]",
+    "button[aria-label], div[aria-label], a[aria-label]",
+    "button[aria-label], div[aria-label]",
+    "[data-tooltip]",
+    "[data-item-id]",
+}
+
 IMAGE_URL_MARKERS = ("googleusercontent", "gstatic", "ggpht", "lh3.googleusercontent")
 
 def strip_label_prefix(value: str, prefixes: Iterable[str] | None = None) -> str:
@@ -293,14 +302,19 @@ def strip_label_prefix(value: str, prefixes: Iterable[str] | None = None) -> str
             return text.split(None, 1)[1].strip()
     return text
 
-def element_values(element, attrs: Iterable[str] = DETAIL_VALUE_ATTRS) -> list[str]:
+def is_broad_detail_selector(selector: str) -> bool:
+    compact = re.sub(r"\s+", " ", str(selector or "").strip())
+    return compact in BROAD_DETAIL_SELECTORS
+
+def element_values(element, attrs: Iterable[str] = DETAIL_VALUE_ATTRS, include_text: bool = True) -> list[str]:
     values: list[str] = []
-    try:
-        text = (element.text or "").strip()
-        if text:
-            values.append(text)
-    except Exception:
-        pass
+    if include_text:
+        try:
+            text = (element.text or "").strip()
+            if text:
+                values.append(text)
+        except Exception:
+            pass
 
     for attr in attrs:
         try:
@@ -332,8 +346,11 @@ def iter_element_values(
             elements = driver.find_elements(By.CSS_SELECTOR, selector)
         except Exception:
             continue
+        include_text = not is_broad_detail_selector(selector)
+        if not include_text:
+            elements = elements[:BROAD_SELECTOR_MAX_ELEMENTS]
         for element in elements:
-            for value in element_values(element, attrs):
+            for value in element_values(element, attrs, include_text=include_text):
                 if value not in seen:
                     seen.add(value)
                     yield value
@@ -911,6 +928,7 @@ def build_driver(headless: bool, language: str, user_data_dir: str | None):
     from selenium import webdriver
 
     options = webdriver.ChromeOptions()
+    options.page_load_strategy = "eager"
     options.add_argument(f"--lang={language}")
     options.add_argument("--window-size=1400,1000")
 
@@ -923,6 +941,11 @@ def build_driver(headless: bool, language: str, user_data_dir: str | None):
         options.add_argument(f"--user-data-dir={user_data_dir}")
 
     return webdriver.Chrome(options=options)
+
+def configure_driver_timeouts(driver, timeout: float) -> None:
+    wait_seconds = max(1.0, float(timeout))
+    driver.set_page_load_timeout(wait_seconds)
+    driver.set_script_timeout(wait_seconds)
 
 
 def wait_for_body(driver, timeout: float) -> None:
@@ -1140,10 +1163,12 @@ def scroll_result_panel(driver) -> None:
         pass
 
 
-def scrape_place(driver, result: ResultLink, timeout: float) -> Place:
+def scrape_place(driver, result: ResultLink, timeout: float, progress: ProgressCallback | None = None) -> Place:
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support.ui import WebDriverWait
 
+    page_started = time.perf_counter()
+    emit(progress, "  Opening detail page...")
     driver.get(result.maps_url)
     wait_for_body(driver, timeout)
     accept_consent_if_present(driver)
@@ -1151,7 +1176,9 @@ def scrape_place(driver, result: ResultLink, timeout: float) -> Place:
 
     WebDriverWait(driver, timeout).until(lambda d: d.find_elements(By.CSS_SELECTOR, "h1"))
     wait_for_detail_fields(driver, timeout)
+    emit(progress, f"  Detail page ready in {time.perf_counter() - page_started:.1f}s")
 
+    extract_started = time.perf_counter()
     name = first_text(driver, ("h1.DUwDvf", "h1")) or result.name_hint
     category = extract_category(driver)
 
@@ -1174,6 +1201,7 @@ def scrape_place(driver, result: ResultLink, timeout: float) -> Place:
     ward = address_parts["ward"]
     normalized_name = normalize_name(name)
     now = utc_now_iso()
+    emit(progress, f"  Extracted fields in {time.perf_counter() - extract_started:.1f}s")
 
     place = Place(
         name=name,
@@ -1343,17 +1371,12 @@ def extract_review_count(driver) -> Optional[int]:
         "button[aria-label], div[aria-label], span[aria-label], a[aria-label]",
         "button[aria-label], div[aria-label], a[aria-label]",
     )
-    candidates: list[str] = []
-
     for combined in iter_element_values(driver, selectors, ("aria-label", "data-tooltip", "title")):
         lowered = strip_accents(combined).lower()
         if any(token in lowered for token in ("review", "reviews", "danh gia", "rating", "xep hang", "(")):
-            candidates.append(combined)
-
-    for candidate in candidates:
-        count = parse_review_count(candidate)
-        if count is not None:
-            return count
+            count = parse_review_count(combined)
+            if count is not None:
+                return count
     return None
 
 
@@ -1374,17 +1397,13 @@ def extract_price_text(driver) -> str:
         '[aria-label*="price"]',
         '[aria-label*="VND"]',
         '[aria-label*="₫"]',
-        "button[aria-label], div[aria-label], span[aria-label], a[aria-label]",
-        "[data-tooltip]",
-        "[data-item-id]",
     )
-    candidates: list[str] = []
-
     for text in iter_element_values(driver, selectors):
         if has_price_marker(text):
-            candidates.append(text)
-
-    return extract_price_text_from_candidates(candidates)
+            price_text = extract_price_text_from_candidates([text])
+            if price_text:
+                return price_text
+    return ""
 
 
 def extract_price_range(driver) -> tuple[Optional[int], Optional[int]]:
@@ -1489,16 +1508,12 @@ def extract_phone(driver) -> str:
         "button[aria-label], div[aria-label]",
         "[data-tooltip]",
     )
-    candidates: list[str] = []
     for value in iter_element_values(driver, selectors):
         lowered = strip_accents(value).lower()
         if any(token in lowered for token in ("phone", "dien thoai", "so dien thoai", "tel:")) or parse_phone_number(value):
-            candidates.append(strip_label_prefix(value, PHONE_LABEL_PREFIXES))
-
-    for candidate in candidates:
-        phone = parse_phone_number(candidate)
-        if phone:
-            return phone
+            phone = parse_phone_number(strip_label_prefix(value, PHONE_LABEL_PREFIXES))
+            if phone:
+                return phone
     return ""
 
 
@@ -1516,16 +1531,12 @@ def extract_website(driver) -> str:
         "button[aria-label], div[aria-label]",
         "[data-tooltip]",
     )
-    candidates: list[str] = []
     for value in iter_element_values(driver, selectors):
         lowered = strip_accents(value).lower()
         if any(token in lowered for token in ("website", "trang web", "http://", "https://", "www.")) or extract_url_from_text(value):
-            candidates.append(strip_label_prefix(value, WEBSITE_LABEL_PREFIXES))
-
-    for candidate in candidates:
-        website = extract_url_from_text(candidate)
-        if website and not is_google_maps_url(website):
-            return website
+            website = extract_url_from_text(strip_label_prefix(value, WEBSITE_LABEL_PREFIXES))
+            if website and not is_google_maps_url(website):
+                return website
     return ""
 
 
@@ -1908,6 +1919,7 @@ def scrape_place_batch(
     owns_driver = driver is None
     if driver is None:
         driver = build_driver(options.headless, options.language, options.user_data_dir)
+        configure_driver_timeouts(driver, options.timeout)
 
     scraped: list[tuple[int, Place]] = []
     current_delay = options.delay
@@ -1926,7 +1938,7 @@ def scrape_place_batch(
             emit(progress, f"[{index}/{total}] Scraping {label}")
 
             try:
-                place = scrape_place(driver, result, options.timeout)
+                place = scrape_place(driver, result, options.timeout, progress)
                 if not place.category and fallback_category:
                     place.category = fallback_category
                     place.tags = build_tags(place.category, place.district)
@@ -1997,6 +2009,7 @@ def run_crawl(
     output_fields = resolve_output_fields(options.output_fields)
     fallback_category = infer_category_from_query(options.query)
     driver = build_driver(options.headless, options.language, options.user_data_dir)
+    configure_driver_timeouts(driver, options.timeout)
     places_with_index: list[tuple[int, Place]] = []
     output_paths: list[Path] = []
     output_path_set: set[str] = set()

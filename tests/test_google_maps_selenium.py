@@ -24,6 +24,32 @@ class FakeDriver:
     def find_elements(self, by=None, value=None):
         return self.elements_by_selector.get(value, [])
 
+class CountingElement:
+    text_reads = 0
+
+    def __init__(self, text="", **attrs):
+        self._text = text
+        self.attrs = attrs
+
+    @property
+    def text(self):
+        type(self).text_reads += 1
+        return self._text
+
+    def get_attribute(self, name):
+        return self.attrs.get(name, "")
+
+class TimeoutFakeDriver:
+    def __init__(self):
+        self.page_load_timeout = None
+        self.script_timeout = None
+
+    def set_page_load_timeout(self, timeout):
+        self.page_load_timeout = timeout
+
+    def set_script_timeout(self, timeout):
+        self.script_timeout = timeout
+
 
 def make_place(**overrides):
     data = {
@@ -99,6 +125,29 @@ class GoogleMapsParserTests(unittest.TestCase):
         links = [gm.ResultLink(str(index), f"https://example.com/{index}") for index in range(5)]
         chunks = gm.chunk_links(links, 2)
         self.assertEqual([[link.name_hint for link in chunk] for chunk in chunks], [["0", "2", "4"], ["1", "3"]])
+
+    def test_broad_detail_selectors_are_capped_and_skip_text_reads(self):
+        CountingElement.text_reads = 0
+        selector = "button[aria-label], div[aria-label], a[aria-label]"
+        driver = FakeDriver({
+            selector: [
+                CountingElement("slow visible text", **{"aria-label": f"Label {index}"})
+                for index in range(gm.BROAD_SELECTOR_MAX_ELEMENTS + 25)
+            ]
+        })
+
+        values = list(gm.iter_element_values(driver, (selector,)))
+
+        self.assertEqual(len(values), gm.BROAD_SELECTOR_MAX_ELEMENTS)
+        self.assertEqual(CountingElement.text_reads, 0)
+
+    def test_configure_driver_timeouts_applies_page_and_script_limits(self):
+        driver = TimeoutFakeDriver()
+
+        gm.configure_driver_timeouts(driver, 7.5)
+
+        self.assertEqual(driver.page_load_timeout, 7.5)
+        self.assertEqual(driver.script_timeout, 7.5)
 
     def test_all_results_limit_uses_zero_as_unlimited(self):
         links = [gm.ResultLink(str(index), f"https://example.com/{index}") for index in range(4)]
