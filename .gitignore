@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Test and tooling cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local app settings
+.google_maps_gui_settings.json
+.env
+.env.*
+
+# Crawl outputs and runtime artifacts
+data/
+screenshots/
+*_checkpoint.json
+*_failed_rows.csv
+*_crawl_report.json
+*.sqlite
+*.db
+*.log
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
