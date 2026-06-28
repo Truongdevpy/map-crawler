@@ -91,6 +91,14 @@ class GoogleMapsGuiConfigTests(unittest.TestCase):
     def test_export_mode_labels_expose_live_and_end_modes(self):
         self.assertEqual(gui.EXPORT_MODE_LABELS[gui.crawler.EXPORT_MODE_END], "Ghi file khi cào xong")
         self.assertEqual(gui.EXPORT_MODE_LABELS[gui.crawler.EXPORT_MODE_LIVE], "Ghi từng dòng trong lúc cào")
+        self.assertEqual(gui.export_mode_value("Ghi file khi cào xong"), gui.crawler.EXPORT_MODE_END)
+        self.assertEqual(gui.export_format_value("CSV"), gui.crawler.EXPORT_FORMAT_CSV)
+        self.assertEqual(gui.write_mode_value("Ghi đè"), gui.crawler.WRITE_MODE_OVERWRITE)
+        self.assertEqual(gui.split_mode_value("Không tách file"), gui.crawler.SPLIT_NONE)
+        self.assertEqual(gui.SPLIT_LABELS[gui.crawler.SPLIT_CATEGORY], "Tách theo danh mục")
+        self.assertEqual(gui.dedupe_mode_value("Theo ID địa điểm"), "destination_id")
+        self.assertEqual(gui.WRITE_MODE_LABELS[gui.crawler.WRITE_MODE_APPEND], "Ghi tiếp / gộp vào file cũ")
+        self.assertEqual(gui.job_status_label("pending"), "Chờ chạy")
 
     def test_place_types_include_more_travel_and_local_business_categories(self):
         expected = {
@@ -110,12 +118,14 @@ class GoogleMapsGuiConfigTests(unittest.TestCase):
         self.assertTrue(expected.issubset(set(gui.PLACE_TYPES)))
 
     def test_category_presets_are_exposed_to_gui(self):
-        self.assertIn("Du lich", gui.CATEGORY_PRESETS)
-        self.assertIn("An uong", gui.CATEGORY_PRESETS)
+        self.assertIn("Du lịch", gui.CATEGORY_PRESETS)
+        self.assertIn("Ăn uống", gui.CATEGORY_PRESETS)
+        self.assertIn("Cà phê - trà sữa", gui.CATEGORY_PRESETS)
 
     def test_location_presets_are_exposed_to_gui(self):
-        self.assertIn("Toan quoc", gui.LOCATION_PRESETS)
-        self.assertEqual(len(gui.LOCATION_PRESETS["Toan quoc"]), 34)
+        self.assertIn("Toàn quốc", gui.LOCATION_PRESETS)
+        self.assertIn("Du lịch biển", gui.LOCATION_PRESETS)
+        self.assertEqual(len(gui.LOCATION_PRESETS["Toàn quốc"]), 34)
 
     def test_build_jobs_from_inputs_cross_joins_for_queue(self):
         generated = gui.build_jobs_from_inputs(
@@ -139,7 +149,7 @@ class GoogleMapsGuiConfigTests(unittest.TestCase):
             limit=5,
             query_template="{type} {location}",
             output_template="data/{type}_{location}_{date}.csv",
-            location_preset="Toan quoc",
+            location_preset="Toàn quốc",
         )
 
         self.assertEqual(len(generated), 34)
@@ -171,6 +181,65 @@ class GoogleMapsGuiConfigTests(unittest.TestCase):
 
         self.assertEqual([place.name for place in sorted_rows], ["C", "A"])
 
+
+    def test_context_menu_formats_preview_rows_for_clipboard(self):
+        rows = [
+            gui.place_to_context_row(make_place(name="A", rating=4.8), ["name", "rating", "maps_url"]),
+            gui.place_to_context_row(make_place(name="B", rating=4.2, maps_url="https://maps.example/b"), ["name", "rating", "maps_url"]),
+        ]
+
+        self.assertEqual(
+            gui.format_rows_for_clipboard(rows, ["name", "rating"], "tsv"),
+            "name\trating\r\nA\t4.8\r\nB\t4.2\r\n",
+        )
+        self.assertEqual(
+            gui.format_rows_for_clipboard(rows[:1], ["name", "rating"], "json"),
+            '[\n  {\n    "name": "A",\n    "rating": 4.8\n  }\n]',
+        )
+
+    def test_context_menu_builds_cards_and_open_urls(self):
+        row = gui.place_to_context_row(
+            make_place(
+                name="Cafe A",
+                category="quán cà phê",
+                address="Cầu Giấy, Hà Nội",
+                phone="0901234567",
+                website="cafe-example.vn",
+                maps_url="",
+                image_url="https://lh3.googleusercontent.com/photo.jpg",
+            ),
+            gui.crawler.SCHEMA_FIELDS,
+        )
+
+        self.assertIn("Cafe A", gui.format_place_contact_card(row))
+        self.assertIn("0901234567", gui.format_place_contact_card(row))
+        self.assertEqual(gui.open_url_for_field(row, "website"), "https://cafe-example.vn")
+        self.assertEqual(gui.open_url_for_field(row, "image_url"), "https://lh3.googleusercontent.com/photo.jpg")
+        self.assertIn("google.com/maps/search/", gui.maps_open_url(row))
+        self.assertIn("Cafe+A", gui.maps_open_url(row))
+
+    def test_context_menu_clones_jobs_for_duplicate_and_test_run(self):
+        job = gui.jobs.CrawlJob(
+            place_type="khách sạn",
+            keyword="view biển",
+            location="Đà Nẵng",
+            limit=50,
+            output="data/a.csv",
+            status="done",
+            saved=10,
+            failed=2,
+            exclude_keywords=["đã đóng cửa"],
+        )
+
+        duplicate = gui.clone_job_for_context(job)
+        test_job = gui.clone_job_for_context(job, limit_override=1)
+
+        self.assertEqual(duplicate.query, job.query)
+        self.assertEqual(duplicate.status, "pending")
+        self.assertEqual(duplicate.saved, 0)
+        self.assertEqual(duplicate.exclude_keywords, ["đã đóng cửa"])
+        self.assertEqual(test_job.limit, 1)
+        self.assertIn(job.query, gui.format_jobs_for_clipboard([job], "tsv"))
 
 if __name__ == "__main__":
     unittest.main()

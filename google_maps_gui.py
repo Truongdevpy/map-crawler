@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import csv
+import io
 import json
 import queue
 import re
@@ -11,6 +13,7 @@ from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
+from urllib.parse import quote_plus
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -39,13 +42,26 @@ EXPORT_FORMAT_LABELS = {
 
 WRITE_MODE_LABELS = {
     crawler.WRITE_MODE_OVERWRITE: "Ghi đè",
-    crawler.WRITE_MODE_APPEND: "Append / merge vào file cũ",
+    crawler.WRITE_MODE_APPEND: "Ghi tiếp / gộp vào file cũ",
 }
 
 SPLIT_LABELS = {
     crawler.SPLIT_NONE: "Không tách file",
-    crawler.SPLIT_CATEGORY: "Tách theo category",
-    crawler.SPLIT_LOCATION: "Tách theo location",
+    crawler.SPLIT_CATEGORY: "Tách theo danh mục",
+    crawler.SPLIT_LOCATION: "Tách theo vị trí",
+}
+
+DEDUPE_LABELS = {
+    "destination_id": "Theo ID địa điểm",
+    "name_address": "Theo tên + địa chỉ",
+    "coordinates": "Theo tọa độ",
+}
+
+JOB_STATUS_LABELS = {
+    "pending": "Chờ chạy",
+    "running": "Đang chạy",
+    "done": "Xong",
+    "error": "Lỗi",
 }
 
 FIELD_LABELS = {
@@ -78,11 +94,54 @@ FIELD_LABELS = {
 
 
 FIELD_LABELS.update({
-    "price_text": "Gia raw",
-    "review_count": "So luot danh gia",
+    "price_text": "Giá raw",
+    "review_count": "Số lượt đánh giá",
     "maps_url": "Link Google Maps",
 })
 
+
+PREVIEW_CONTEXT_COPY_FIELDS = [
+    "name",
+    "category",
+    "address",
+    "district",
+    "phone",
+    "website",
+    "maps_url",
+    "rating",
+    "review_count",
+    "price_text",
+    "latitude",
+    "longitude",
+    "image_url",
+]
+
+JOB_CONTEXT_FIELDS = ["status", "query", "limit", "output", "saved", "failed"]
+
+def label_for_value(labels: dict[str, str], value: str) -> str:
+    return labels.get(value, value)
+
+def value_from_label(labels: dict[str, str], value: str) -> str:
+    reverse = {label: key for key, label in labels.items()}
+    return reverse.get(value, value)
+
+def export_mode_value(value: str) -> str:
+    return value_from_label(EXPORT_MODE_LABELS, value)
+
+def export_format_value(value: str) -> str:
+    return value_from_label(EXPORT_FORMAT_LABELS, value)
+
+def write_mode_value(value: str) -> str:
+    return value_from_label(WRITE_MODE_LABELS, value)
+
+def split_mode_value(value: str) -> str:
+    return value_from_label(SPLIT_LABELS, value)
+
+def dedupe_mode_value(value: str) -> str:
+    return value_from_label(DEDUPE_LABELS, value)
+
+def job_status_label(status: str) -> str:
+    return JOB_STATUS_LABELS.get(status, status)
 
 def build_query(place_type: str, keyword: str, location: str, query_template: str = jobs.QUERY_TEMPLATE) -> str:
     return jobs.build_query(query_template, place_type, keyword, location)
@@ -214,6 +273,110 @@ def filter_places(
     return filtered
 
 
+def place_to_context_row(place: crawler.Place, fields: Iterable[str] | None = None) -> dict[str, Any]:
+    row = asdict(place)
+    selected_fields = list(fields or row.keys())
+    return {field: row.get(field, "") for field in selected_fields}
+
+def format_rows_for_clipboard(rows: Iterable[dict[str, Any]], fields: Iterable[str], export_format: str = "tsv") -> str:
+    row_list = list(rows)
+    field_list = list(fields)
+    if export_format == "json":
+        return json.dumps(
+            [{field: row.get(field, "") for field in field_list} for row in row_list],
+            ensure_ascii=False,
+            indent=2,
+        )
+
+    buffer = io.StringIO(newline="")
+    delimiter = "," if export_format == "csv" else "\t"
+    writer = csv.writer(buffer, delimiter=delimiter)
+    writer.writerow(field_list)
+    for row in row_list:
+        writer.writerow(["" if row.get(field) is None else row.get(field, "") for field in field_list])
+    return buffer.getvalue()
+
+def format_place_contact_card(row: dict[str, Any]) -> str:
+    lines: list[str] = []
+    primary = str(row.get("name") or "").strip()
+    if primary:
+        lines.append(primary)
+    for field in ("category", "rating", "review_count", "price_text", "address", "phone", "website", "maps_url"):
+        value = row.get(field)
+        if value not in (None, ""):
+            label = FIELD_LABELS.get(field, field)
+            lines.append(f"{label}: {value}")
+    latitude = row.get("latitude")
+    longitude = row.get("longitude")
+    if latitude not in (None, "") and longitude not in (None, ""):
+        lines.append(f"Tọa độ: {latitude},{longitude}")
+    return "\n".join(lines)
+
+def maps_open_url(row: dict[str, Any]) -> str:
+    maps_url = str(row.get("maps_url") or "").strip()
+    if maps_url:
+        return maps_url
+
+    query = " ".join(
+        str(row.get(field) or "").strip()
+        for field in ("name", "address", "district", "province")
+        if str(row.get(field) or "").strip()
+    )
+    return f"https://www.google.com/maps/search/{quote_plus(query)}" if query else "https://www.google.com/maps"
+
+def open_url_for_field(row: dict[str, Any], field: str) -> str:
+    if field == "maps_url":
+        return maps_open_url(row)
+    value = str(row.get(field) or "").strip()
+    if not value:
+        return ""
+    if field == "website":
+        return crawler.extract_url_from_text(value)
+    if field == "image_url" and value.startswith(("http://", "https://")):
+        return value
+    if value.startswith(("http://", "https://")):
+        return value
+    return ""
+
+def clone_job_for_context(job: jobs.CrawlJob, limit_override: int | None = None) -> jobs.CrawlJob:
+    return jobs.CrawlJob(
+        place_type=job.place_type,
+        keyword=job.keyword,
+        location=job.location,
+        limit=job.limit if limit_override is None else limit_override,
+        output=job.output,
+        query_template=job.query_template,
+        status="pending",
+        done=0,
+        saved=0,
+        failed=0,
+        exclude_keywords=list(job.exclude_keywords),
+    )
+
+def job_to_context_row(job: jobs.CrawlJob) -> dict[str, Any]:
+    return {
+        "status": job_status_label(job.status),
+        "query": job.query,
+        "limit": format_job_limit(job.limit),
+        "output": job.output,
+        "saved": job.saved,
+        "failed": job.failed,
+    }
+
+def format_jobs_for_clipboard(crawl_jobs: Iterable[jobs.CrawlJob], export_format: str = "tsv") -> str:
+    rows = [job_to_context_row(job) for job in crawl_jobs]
+    return format_rows_for_clipboard(rows, JOB_CONTEXT_FIELDS, export_format)
+
+def field_from_tree_column(fields: list[str], column_id: str) -> str:
+    if not column_id.startswith("#"):
+        return ""
+    try:
+        index = int(column_id[1:]) - 1
+    except ValueError:
+        return ""
+    return fields[index] if 0 <= index < len(fields) else ""
+
+
 class GoogleMapsCrawlerApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
@@ -246,11 +409,11 @@ class GoogleMapsCrawlerApp:
         self.worker_count_var = tk.StringVar(value="1")
         self.output_var = tk.StringVar(value=str(default_output_path()))
         self.output_template_var = tk.StringVar(value="data/{type}_{location}_{date}.csv")
-        self.export_mode_var = tk.StringVar(value=crawler.EXPORT_MODE_END)
-        self.export_format_var = tk.StringVar(value=crawler.EXPORT_FORMAT_CSV)
-        self.write_mode_var = tk.StringVar(value=crawler.WRITE_MODE_OVERWRITE)
-        self.split_by_var = tk.StringVar(value=crawler.SPLIT_NONE)
-        self.dedupe_mode_var = tk.StringVar(value="destination_id")
+        self.export_mode_var = tk.StringVar(value=label_for_value(EXPORT_MODE_LABELS, crawler.EXPORT_MODE_END))
+        self.export_format_var = tk.StringVar(value=label_for_value(EXPORT_FORMAT_LABELS, crawler.EXPORT_FORMAT_CSV))
+        self.write_mode_var = tk.StringVar(value=label_for_value(WRITE_MODE_LABELS, crawler.WRITE_MODE_OVERWRITE))
+        self.split_by_var = tk.StringVar(value=label_for_value(SPLIT_LABELS, crawler.SPLIT_NONE))
+        self.dedupe_mode_var = tk.StringVar(value=label_for_value(DEDUPE_LABELS, "destination_id"))
         self.resume_var = tk.BooleanVar(value=True)
         self.headless_var = tk.BooleanVar(value=False)
         self.status_var = tk.StringVar(value="Sẵn sàng")
@@ -300,11 +463,11 @@ class GoogleMapsCrawlerApp:
         preview_tab = ttk.Frame(notebook, padding=12)
         log_tab = ttk.Frame(notebook, padding=12)
 
-        notebook.add(job_tab, text="Job Queue")
+        notebook.add(job_tab, text="Hàng đợi job")
         notebook.add(config_tab, text="Cấu hình")
         notebook.add(fields_tab, text="Trường dữ liệu")
-        notebook.add(preview_tab, text="Preview")
-        notebook.add(log_tab, text="Log")
+        notebook.add(preview_tab, text="Xem trước")
+        notebook.add(log_tab, text="Nhật ký")
 
         self._build_job_tab(job_tab)
         self._build_config_tab(config_tab)
@@ -322,10 +485,10 @@ class GoogleMapsCrawlerApp:
         buttons = [
             ("Thêm job", self._add_single_job),
             ("Tạo từ multi query", self._generate_jobs),
-            ("Import TXT/CSV", self._import_jobs),
+            ("Nhập TXT/CSV", self._import_jobs),
             ("Lưu preset", self._save_preset),
-            ("Load preset", self._load_preset),
-            ("Retry job lỗi", self._retry_failed_jobs),
+            ("Tải preset", self._load_preset),
+            ("Chạy lại job lỗi", self._retry_failed_jobs),
             ("Xóa job", self._remove_selected_jobs),
             ("Xóa tất cả", self._clear_jobs),
         ]
@@ -342,6 +505,8 @@ class GoogleMapsCrawlerApp:
         y_scroll = ttk.Scrollbar(parent, orient="vertical", command=self.job_tree.yview)
         y_scroll.grid(row=1, column=1, sticky="ns")
         self.job_tree.configure(yscrollcommand=y_scroll.set)
+        self.job_tree.bind("<Button-3>", self._show_job_context_menu)
+        self.job_tree.bind("<Button-2>", self._show_job_context_menu)
 
     def _build_config_tab(self, parent: ttk.Frame) -> None:
         parent.columnconfigure(1, weight=1)
@@ -370,7 +535,7 @@ class GoogleMapsCrawlerApp:
             command=self._refresh_limit_state,
         ).grid(row=0, column=1, sticky="w", padx=(10, 0))
 
-        self._add_label(parent, "Template query", 2, 0)
+        self._add_label(parent, "Mẫu câu tìm kiếm", 2, 0)
         ttk.Entry(parent, textvariable=self.query_template_var).grid(row=2, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=5)
 
         self._add_label(parent, "Nhiều loại", 3, 0)
@@ -400,35 +565,35 @@ class GoogleMapsCrawlerApp:
         ttk.Entry(parent, textvariable=self.output_template_var).grid(row=8, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=5)
 
         self._add_label(parent, "Định dạng", 9, 0)
-        ttk.Combobox(parent, textvariable=self.export_format_var, values=list(crawler.EXPORT_FORMATS), state="readonly").grid(row=9, column=1, sticky="ew", padx=(8, 18), pady=5)
+        ttk.Combobox(parent, textvariable=self.export_format_var, values=list(EXPORT_FORMAT_LABELS.values()), state="readonly").grid(row=9, column=1, sticky="ew", padx=(8, 18), pady=5)
 
         self._add_label(parent, "Chế độ xuất", 9, 2)
-        ttk.Combobox(parent, textvariable=self.export_mode_var, values=list(crawler.EXPORT_MODES), state="readonly").grid(row=9, column=3, sticky="ew", padx=(8, 0), pady=5)
+        ttk.Combobox(parent, textvariable=self.export_mode_var, values=list(EXPORT_MODE_LABELS.values()), state="readonly").grid(row=9, column=3, sticky="ew", padx=(8, 0), pady=5)
 
         self._add_label(parent, "Ghi file", 10, 0)
-        ttk.Combobox(parent, textvariable=self.write_mode_var, values=list(crawler.WRITE_MODES), state="readonly").grid(row=10, column=1, sticky="ew", padx=(8, 18), pady=5)
+        ttk.Combobox(parent, textvariable=self.write_mode_var, values=list(WRITE_MODE_LABELS.values()), state="readonly").grid(row=10, column=1, sticky="ew", padx=(8, 18), pady=5)
 
         self._add_label(parent, "Tách file", 10, 2)
-        ttk.Combobox(parent, textvariable=self.split_by_var, values=list(crawler.SPLIT_MODES), state="readonly").grid(row=10, column=3, sticky="ew", padx=(8, 0), pady=5)
+        ttk.Combobox(parent, textvariable=self.split_by_var, values=list(SPLIT_LABELS.values()), state="readonly").grid(row=10, column=3, sticky="ew", padx=(8, 0), pady=5)
 
-        self._add_label(parent, "Dedupe", 11, 0)
-        ttk.Combobox(parent, textvariable=self.dedupe_mode_var, values=["destination_id", "name_address", "coordinates"], state="readonly").grid(row=11, column=1, sticky="ew", padx=(8, 18), pady=5)
+        self._add_label(parent, "Chống trùng", 11, 0)
+        ttk.Combobox(parent, textvariable=self.dedupe_mode_var, values=list(DEDUPE_LABELS.values()), state="readonly").grid(row=11, column=1, sticky="ew", padx=(8, 18), pady=5)
 
         flags = ttk.Frame(parent)
         flags.grid(row=11, column=2, columnspan=2, sticky="w", padx=(8, 0), pady=5)
-        ttk.Checkbutton(flags, text="Resume từ file/checkpoint", variable=self.resume_var).grid(row=0, column=0, padx=(0, 18))
+        ttk.Checkbutton(flags, text="Chạy tiếp từ file/checkpoint", variable=self.resume_var).grid(row=0, column=0, padx=(0, 18))
         ttk.Checkbutton(flags, text="Chạy ẩn Chrome", variable=self.headless_var).grid(row=0, column=1)
 
-        timing = ttk.LabelFrame(parent, text="Delay / timeout / luồng", padding=10)
+        timing = ttk.LabelFrame(parent, text="Độ trễ / thời gian chờ / số luồng", padding=10)
         timing.grid(row=12, column=0, columnspan=4, sticky="ew", pady=(12, 0))
         for column in range(8):
             timing.columnconfigure(column, weight=1)
-        labels = [("Delay nơi", self.delay_var), ("Delay cuộn", self.scroll_pause_var), ("Timeout", self.timeout_var), ("Số luồng", self.worker_count_var)]
+        labels = [("Độ trễ mỗi nơi", self.delay_var), ("Độ trễ cuộn", self.scroll_pause_var), ("Chờ tối đa", self.timeout_var), ("Số luồng", self.worker_count_var)]
         for index, (label, variable) in enumerate(labels):
             ttk.Label(timing, text=label).grid(row=0, column=index * 2, sticky="w", padx=(0, 6))
             ttk.Entry(timing, textvariable=variable, width=12).grid(row=0, column=index * 2 + 1, sticky="ew", padx=(0, 12))
 
-        query_frame = ttk.LabelFrame(parent, text="Query preview", padding=10)
+        query_frame = ttk.LabelFrame(parent, text="Xem trước câu tìm kiếm", padding=10)
         query_frame.grid(row=13, column=0, columnspan=4, sticky="ew", pady=(12, 0))
         query_frame.columnconfigure(0, weight=1)
         self.query_preview = ttk.Label(query_frame, text="", anchor="w")
@@ -472,9 +637,9 @@ class GoogleMapsCrawlerApp:
         ttk.Entry(filters, textvariable=self.rating_filter_var, width=8).grid(row=0, column=1, sticky="ew", padx=(6, 12))
         ttk.Label(filters, text="Giá max").grid(row=0, column=2, sticky="w")
         ttk.Entry(filters, textvariable=self.price_filter_var, width=10).grid(row=0, column=3, sticky="ew", padx=(6, 12))
-        ttk.Label(filters, text="District").grid(row=0, column=4, sticky="w")
+        ttk.Label(filters, text="Quận/Huyện").grid(row=0, column=4, sticky="w")
         ttk.Entry(filters, textvariable=self.district_filter_var).grid(row=0, column=5, sticky="ew", padx=(6, 12))
-        ttk.Label(filters, text="Sort").grid(row=0, column=6, sticky="w")
+        ttk.Label(filters, text="Sắp xếp").grid(row=0, column=6, sticky="w")
         ttk.Combobox(filters, textvariable=self.sort_field_var, values=crawler.SCHEMA_FIELDS, state="readonly", width=18).grid(row=0, column=7, sticky="ew", padx=(6, 12))
         ttk.Checkbutton(filters, text="Giảm dần", variable=self.sort_desc_var).grid(row=0, column=8, sticky="w")
         ttk.Button(filters, text="Áp dụng", command=self._apply_preview_filter).grid(row=0, column=9, padx=(8, 0))
@@ -487,6 +652,8 @@ class GoogleMapsCrawlerApp:
         x_scroll.grid(row=2, column=0, sticky="ew")
         self.preview_tree.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
         self._configure_preview_columns(crawler.SCHEMA_FIELDS)
+        self.preview_tree.bind("<Button-3>", self._show_preview_context_menu)
+        self.preview_tree.bind("<Button-2>", self._show_preview_context_menu)
 
     def _build_log_tab(self, parent: ttk.Frame) -> None:
         parent.columnconfigure(0, weight=1)
@@ -500,19 +667,21 @@ class GoogleMapsCrawlerApp:
         self.log_text.tag_configure("warning", foreground="#a16207")
         self.log_text.tag_configure("error", foreground="#b91c1c")
         self.log_text.tag_configure("success", foreground="#047857")
+        self.log_text.bind("<Button-3>", self._show_log_context_menu)
+        self.log_text.bind("<Button-2>", self._show_log_context_menu)
 
     def _build_footer(self, parent: ttk.Frame) -> None:
         footer = ttk.Frame(parent)
         footer.grid(row=1, column=0, sticky="ew", pady=(10, 0))
         footer.columnconfigure(8, weight=1)
-        self.start_button = ttk.Button(footer, text="Start Queue", command=self._start)
+        self.start_button = ttk.Button(footer, text="Chạy hàng đợi", command=self._start)
         self.start_button.grid(row=0, column=0, padx=(0, 8))
         ttk.Button(footer, text="Test crawl 1 dòng", command=self._start_test).grid(row=0, column=1, padx=(0, 8))
-        self.pause_button = ttk.Button(footer, text="Pause", command=self._pause, state="disabled")
+        self.pause_button = ttk.Button(footer, text="Tạm dừng", command=self._pause, state="disabled")
         self.pause_button.grid(row=0, column=2, padx=(0, 8))
-        self.resume_button = ttk.Button(footer, text="Resume", command=self._resume, state="disabled")
+        self.resume_button = ttk.Button(footer, text="Tiếp tục", command=self._resume, state="disabled")
         self.resume_button.grid(row=0, column=3, padx=(0, 8))
-        self.stop_button = ttk.Button(footer, text="Stop", command=self._stop, state="disabled")
+        self.stop_button = ttk.Button(footer, text="Dừng", command=self._stop, state="disabled")
         self.stop_button.grid(row=0, column=4, padx=(0, 8))
         ttk.Button(footer, text="Mở file", command=self._open_output_file).grid(row=0, column=5, padx=(0, 8))
         ttk.Button(footer, text="Mở thư mục", command=self._open_output_folder).grid(row=0, column=6, padx=(0, 12))
@@ -522,6 +691,231 @@ class GoogleMapsCrawlerApp:
 
     def _add_label(self, parent: ttk.Frame, text: str, row: int, column: int) -> None:
         ttk.Label(parent, text=text).grid(row=row, column=column, sticky="w", pady=5)
+
+    def _popup_menu(self, menu: tk.Menu, event: tk.Event) -> None:
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _add_menu_command(self, menu: tk.Menu, label: str, command, enabled: bool = True) -> None:
+        menu.add_command(label=label, command=command, state="normal" if enabled else "disabled")
+
+    def _copy_to_clipboard(self, text: str, label: str = "") -> None:
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+        self.status_var.set(f"Đã copy {label}" if label else "Đã copy")
+
+    def _tree_row_from_item(self, tree: ttk.Treeview, item: str, fields: list[str]) -> dict[str, Any]:
+        values = tree.item(item, "values")
+        return {field: values[index] if index < len(values) else "" for index, field in enumerate(fields)}
+
+    def _preview_rows_from_items(self, items: Iterable[str]) -> list[dict[str, Any]]:
+        return [self._tree_row_from_item(self.preview_tree, item, self.preview_fields) for item in items]
+
+    def _all_preview_rows(self) -> list[dict[str, Any]]:
+        return self._preview_rows_from_items(self.preview_tree.get_children())
+
+    def _copy_preview_rows(self, items: Iterable[str], export_format: str, label: str) -> None:
+        rows = self._preview_rows_from_items(items)
+        self._copy_to_clipboard(format_rows_for_clipboard(rows, self.preview_fields, export_format), label)
+
+    def _copy_preview_field(self, items: Iterable[str], field: str) -> None:
+        rows = self._preview_rows_from_items(items)
+        values = [str(row.get(field) or "") for row in rows]
+        self._copy_to_clipboard("\n".join(values), FIELD_LABELS.get(field, field))
+
+    def _copy_preview_contact_card(self, row: dict[str, Any]) -> None:
+        self._copy_to_clipboard(format_place_contact_card(row), "thẻ thông tin")
+
+    def _copy_preview_coordinates(self, row: dict[str, Any]) -> None:
+        latitude = row.get("latitude")
+        longitude = row.get("longitude")
+        value = f"{latitude},{longitude}" if latitude not in (None, "") and longitude not in (None, "") else ""
+        self._copy_to_clipboard(value, "tọa độ")
+
+    def _open_url(self, url: str, title: str = "Không có link") -> None:
+        if url:
+            webbrowser.open(url)
+        else:
+            messagebox.showinfo(title, "Dòng này chưa có link để mở.")
+
+    def _open_path_file(self, path_value: str) -> None:
+        path = Path(path_value or "").expanduser()
+        if path.exists():
+            webbrowser.open(str(path.resolve()))
+        else:
+            messagebox.showinfo("Chưa có file", "File này chưa tồn tại.")
+
+    def _open_path_folder(self, path_value: str) -> None:
+        path = Path(path_value or "").expanduser()
+        folder = path.parent if path.suffix else path
+        if folder.exists():
+            webbrowser.open(str(folder.resolve()))
+        else:
+            messagebox.showinfo("Chưa có thư mục", "Thư mục output chưa tồn tại.")
+
+    def _show_preview_context_menu(self, event: tk.Event) -> None:
+        item = self.preview_tree.identify_row(event.y)
+        column_id = self.preview_tree.identify_column(event.x)
+        if item:
+            if item not in self.preview_tree.selection():
+                self.preview_tree.selection_set(item)
+            self.preview_tree.focus(item)
+
+        selected_items = list(self.preview_tree.selection())
+        row = self._tree_row_from_item(self.preview_tree, item, self.preview_fields) if item else {}
+        field = field_from_tree_column(self.preview_fields, column_id)
+        has_row = bool(row)
+        has_selection = bool(selected_items)
+        visible_items = list(self.preview_tree.get_children())
+        menu = tk.Menu(self.root, tearoff=False)
+
+        self._add_menu_command(menu, f"Sao chép ô ({field})", lambda f=field, i=item: self._copy_preview_field([i], f), has_row and bool(field))
+        self._add_menu_command(menu, "Sao chép dòng này - TSV", lambda i=item: self._copy_preview_rows([i], "tsv", "dòng TSV"), has_row)
+        self._add_menu_command(menu, "Sao chép dòng này - JSON", lambda i=item: self._copy_preview_rows([i], "json", "dòng JSON"), has_row)
+        self._add_menu_command(menu, "Sao chép thẻ thông tin", lambda r=row: self._copy_preview_contact_card(r), has_row)
+        self._add_menu_command(menu, "Sao chép tọa độ", lambda r=row: self._copy_preview_coordinates(r), has_row)
+
+        field_menu = tk.Menu(menu, tearoff=False)
+        for copy_field in PREVIEW_CONTEXT_COPY_FIELDS:
+            if copy_field in self.preview_fields:
+                field_menu.add_command(
+                    label=f"{FIELD_LABELS.get(copy_field, copy_field)}",
+                    command=lambda f=copy_field, items=tuple(selected_items or ([item] if item else [])): self._copy_preview_field(items, f),
+                )
+        menu.add_cascade(label="Sao chép từng trường", menu=field_menu, state="normal" if has_row else "disabled")
+
+        menu.add_separator()
+        self._add_menu_command(menu, "Sao chép các dòng chọn - TSV", lambda items=tuple(selected_items): self._copy_preview_rows(items, "tsv", "các dòng chọn TSV"), has_selection)
+        self._add_menu_command(menu, "Sao chép các dòng chọn - CSV", lambda items=tuple(selected_items): self._copy_preview_rows(items, "csv", "các dòng chọn CSV"), has_selection)
+        self._add_menu_command(menu, "Sao chép các dòng chọn - JSON", lambda items=tuple(selected_items): self._copy_preview_rows(items, "json", "các dòng chọn JSON"), has_selection)
+        self._add_menu_command(menu, "Sao chép tất cả đang hiển thị - TSV", lambda items=tuple(visible_items): self._copy_preview_rows(items, "tsv", "tất cả TSV"), bool(visible_items))
+        self._add_menu_command(menu, "Sao chép tất cả đang hiển thị - CSV", lambda items=tuple(visible_items): self._copy_preview_rows(items, "csv", "tất cả CSV"), bool(visible_items))
+        self._add_menu_command(menu, "Sao chép tất cả đang hiển thị - JSON", lambda items=tuple(visible_items): self._copy_preview_rows(items, "json", "tất cả JSON"), bool(visible_items))
+
+        menu.add_separator()
+        maps_url = maps_open_url(row) if has_row else ""
+        website_url = open_url_for_field(row, "website") if has_row else ""
+        image_url = open_url_for_field(row, "image_url") if has_row else ""
+        self._add_menu_command(menu, "Mở quán trên Google Maps", lambda url=maps_url: self._open_url(url, "Không có Google Maps"), has_row)
+        self._add_menu_command(menu, "Mở website", lambda url=website_url: self._open_url(url, "Không có website"), bool(website_url))
+        self._add_menu_command(menu, "Mở ảnh", lambda url=image_url: self._open_url(url, "Không có ảnh"), bool(image_url))
+        self._add_menu_command(menu, "Sao chép link mở Maps", lambda url=maps_url: self._copy_to_clipboard(url, "link Maps"), has_row)
+
+        self._popup_menu(menu, event)
+
+    def _selected_job_indices(self) -> list[int]:
+        indices: list[int] = []
+        for item in self.job_tree.selection():
+            try:
+                index = int(item)
+            except ValueError:
+                continue
+            if 0 <= index < len(self.job_queue):
+                indices.append(index)
+        return sorted(set(indices))
+
+    def _copy_job_rows(self, indices: Iterable[int], export_format: str, label: str) -> None:
+        selected_jobs = [self.job_queue[index] for index in indices if 0 <= index < len(self.job_queue)]
+        self._copy_to_clipboard(format_jobs_for_clipboard(selected_jobs, export_format), label)
+
+    def _duplicate_selected_jobs(self) -> None:
+        indices = self._selected_job_indices()
+        clones = [clone_job_for_context(self.job_queue[index]) for index in indices]
+        self.job_queue.extend(clones)
+        self._refresh_job_tree()
+        self._append_log(f"Đã nhân bản {len(clones)} job.", "success")
+
+    def _retry_selected_jobs(self) -> None:
+        count = 0
+        for index in self._selected_job_indices():
+            job = self.job_queue[index]
+            job.status = "pending"
+            job.failed = 0
+            count += 1
+        self._refresh_job_tree()
+        self._append_log(f"Đã đưa {count} job đã chọn về trạng thái chờ chạy.", "warning")
+
+    def _start_selected_jobs(self, test_one: bool = False) -> None:
+        indices = self._selected_job_indices()
+        if not indices:
+            messagebox.showinfo("Chưa chọn job", "Chọn ít nhất một job trong bảng.")
+            return
+        selected_jobs = [self.job_queue[index] for index in indices]
+        if test_one:
+            selected_jobs = [clone_job_for_context(job, limit_override=1) for job in selected_jobs]
+        self._start_job_list(selected_jobs, test_one=test_one)
+
+    def _show_job_context_menu(self, event: tk.Event) -> None:
+        item = self.job_tree.identify_row(event.y)
+        column_id = self.job_tree.identify_column(event.x)
+        if item:
+            if item not in self.job_tree.selection():
+                self.job_tree.selection_set(item)
+            self.job_tree.focus(item)
+
+        indices = self._selected_job_indices()
+        job = self.job_queue[int(item)] if item and item.isdigit() and int(item) < len(self.job_queue) else None
+        field = field_from_tree_column(JOB_CONTEXT_FIELDS, column_id)
+        row = job_to_context_row(job) if job else {}
+        has_job = job is not None
+        has_selection = bool(indices)
+        output = str(row.get("output") or "")
+        query_url = f"https://www.google.com/maps/search/{quote_plus(job.query)}" if job else ""
+
+        menu = tk.Menu(self.root, tearoff=False)
+        self._add_menu_command(menu, f"Sao chép ô ({field})", lambda r=row, f=field: self._copy_to_clipboard(str(r.get(f, "")), f), has_job and bool(field))
+        self._add_menu_command(menu, "Sao chép câu tìm kiếm", lambda j=job: self._copy_to_clipboard(j.query, "câu tìm kiếm"), has_job)
+        self._add_menu_command(menu, "Sao chép đường dẫn output", lambda value=output: self._copy_to_clipboard(value, "output"), bool(output))
+        self._add_menu_command(menu, "Sao chép job chọn - TSV", lambda idx=tuple(indices): self._copy_job_rows(idx, "tsv", "job TSV"), has_selection)
+        self._add_menu_command(menu, "Sao chép job chọn - CSV", lambda idx=tuple(indices): self._copy_job_rows(idx, "csv", "job CSV"), has_selection)
+        self._add_menu_command(menu, "Sao chép job chọn - JSON", lambda idx=tuple(indices): self._copy_job_rows(idx, "json", "job JSON"), has_selection)
+
+        menu.add_separator()
+        self._add_menu_command(menu, "Chạy job đã chọn", lambda: self._start_selected_jobs(test_one=False), has_selection)
+        self._add_menu_command(menu, "Test crawl job đã chọn (limit 1)", lambda: self._start_selected_jobs(test_one=True), has_selection)
+        self._add_menu_command(menu, "Nhân bản job đã chọn", self._duplicate_selected_jobs, has_selection)
+        self._add_menu_command(menu, "Chạy lại job đã chọn", self._retry_selected_jobs, has_selection)
+        self._add_menu_command(menu, "Xóa job đã chọn", self._remove_selected_jobs, has_selection)
+
+        menu.add_separator()
+        self._add_menu_command(menu, "Mở query trên Google Maps", lambda url=query_url: self._open_url(url, "Không có query"), has_job)
+        self._add_menu_command(menu, "Mở file output", lambda value=output: self._open_path_file(value), bool(output))
+        self._add_menu_command(menu, "Mở thư mục output", lambda value=output: self._open_path_folder(value), bool(output))
+
+        self._popup_menu(menu, event)
+
+    def _log_selection_text(self) -> str:
+        try:
+            return self.log_text.get("sel.first", "sel.last")
+        except tk.TclError:
+            return ""
+
+    def _copy_log_selection(self) -> None:
+        self._copy_to_clipboard(self._log_selection_text(), "nhật ký đã chọn")
+
+    def _copy_log_all(self) -> None:
+        self._copy_to_clipboard(self.log_text.get("1.0", "end-1c"), "toàn bộ nhật ký")
+
+    def _clear_log_text(self) -> None:
+        self.log_text.delete("1.0", "end")
+
+    def _select_all_log_text(self) -> None:
+        self.log_text.tag_add("sel", "1.0", "end-1c")
+        self.log_text.mark_set("insert", "1.0")
+        self.log_text.see("insert")
+
+    def _show_log_context_menu(self, event: tk.Event) -> None:
+        has_selection = bool(self._log_selection_text())
+        has_log = bool(self.log_text.get("1.0", "end-1c").strip())
+        menu = tk.Menu(self.root, tearoff=False)
+        self._add_menu_command(menu, "Sao chép đoạn nhật ký đã chọn", self._copy_log_selection, has_selection)
+        self._add_menu_command(menu, "Sao chép toàn bộ nhật ký", self._copy_log_all, has_log)
+        self._add_menu_command(menu, "Chọn toàn bộ nhật ký", self._select_all_log_text, has_log)
+        menu.add_separator()
+        self._add_menu_command(menu, "Xóa nhật ký", self._clear_log_text, has_log)
+        self._popup_menu(menu, event)
 
     def _refresh_limit_state(self) -> None:
         if hasattr(self, "limit_spinbox"):
@@ -536,13 +930,19 @@ class GoogleMapsCrawlerApp:
 
     def _apply_category_preset(self) -> None:
         preset = self.category_preset_var.get()
-        if preset in CATEGORY_PRESETS:
-            self.multi_types_var.set(", ".join(CATEGORY_PRESETS[preset]))
-            self.place_type_var.set(CATEGORY_PRESETS[preset][0])
+        categories = jobs.categories_for_preset(preset)
+        resolved = jobs.resolve_preset_name(preset, CATEGORY_PRESETS)
+        if categories:
+            self.category_preset_var.set(resolved)
+            self.multi_types_var.set(", ".join(categories))
+            self.place_type_var.set(categories[0])
 
     def _apply_location_preset(self) -> None:
         locations = jobs.locations_for_preset(self.location_preset_var.get(), self.multi_locations_var.get())
         if locations:
+            resolved = jobs.resolve_preset_name(self.location_preset_var.get(), LOCATION_PRESETS)
+            if resolved in LOCATION_PRESETS:
+                self.location_preset_var.set(resolved)
             self.multi_locations_var.set(", ".join(locations))
             self.location_var.set(locations[0])
             self._append_log(f"Đã áp dụng vùng {self.location_preset_var.get()}: {len(locations)} vị trí.", "info")
@@ -556,7 +956,7 @@ class GoogleMapsCrawlerApp:
             title="Chọn file output",
             initialfile=Path(self.output_var.get()).name,
             defaultextension=".csv",
-            filetypes=[("All supported", "*.csv *.jsonl *.sqlite *.xlsx"), ("All files", "*.*")],
+            filetypes=[("Định dạng hỗ trợ", "*.csv *.jsonl *.sqlite *.xlsx"), ("Tất cả file", "*.*")],
         )
         if path:
             self.output_var.set(path)
@@ -606,7 +1006,7 @@ class GoogleMapsCrawlerApp:
                 limit=parse_limit_for_mode(self.limit_var.get(), "Số lượng", self.all_results_var.get()),
                 query_template=self.query_template_var.get(),
                 output_template=self.output_template_var.get(),
-                export_format=self.export_format_var.get(),
+                export_format=export_format_value(self.export_format_var.get()),
                 location_preset=self.location_preset_var.get(),
                 all_results=self.all_results_var.get(),
             )
@@ -620,17 +1020,17 @@ class GoogleMapsCrawlerApp:
         self._append_log(f"Đã tạo {len(generated)} job.", "success")
 
     def _import_jobs(self) -> None:
-        path = filedialog.askopenfilename(title="Import jobs", filetypes=[("Job files", "*.txt *.csv"), ("All files", "*.*")])
+        path = filedialog.askopenfilename(title="Nhập job", filetypes=[("File job", "*.txt *.csv"), ("Tất cả file", "*.*")])
         if not path:
             return
         try:
             imported = jobs.import_jobs(Path(path))
         except Exception as exc:
-            messagebox.showerror("Import lỗi", str(exc))
+            messagebox.showerror("Nhập job lỗi", str(exc))
             return
         self.job_queue.extend(imported)
         self._refresh_job_tree()
-        self._append_log(f"Imported {len(imported)} job từ {path}", "success")
+        self._append_log(f"Đã nhập {len(imported)} job từ {path}", "success")
 
     def _save_preset(self) -> None:
         path = filedialog.asksaveasfilename(title="Lưu preset", defaultextension=".json", filetypes=[("JSON", "*.json")])
@@ -640,18 +1040,18 @@ class GoogleMapsCrawlerApp:
         self._append_log(f"Đã lưu preset: {path}", "success")
 
     def _load_preset(self) -> None:
-        path = filedialog.askopenfilename(title="Load preset", filetypes=[("JSON", "*.json"), ("All files", "*.*")])
+        path = filedialog.askopenfilename(title="Tải preset", filetypes=[("JSON", "*.json"), ("Tất cả file", "*.*")])
         if not path:
             return
         try:
             loaded_jobs, settings = jobs.load_preset(Path(path))
         except Exception as exc:
-            messagebox.showerror("Load preset lỗi", str(exc))
+            messagebox.showerror("Tải preset lỗi", str(exc))
             return
         self.job_queue = loaded_jobs
         self._apply_settings(settings)
         self._refresh_job_tree()
-        self._append_log(f"Đã load preset: {path}", "success")
+        self._append_log(f"Đã tải preset: {path}", "success")
 
     def _retry_failed_jobs(self) -> None:
         retried = 0
@@ -661,7 +1061,7 @@ class GoogleMapsCrawlerApp:
                 job.failed = 0
                 retried += 1
         self._refresh_job_tree()
-        self._append_log(f"Đã đưa {retried} job lỗi về pending.", "warning")
+        self._append_log(f"Đã đưa {retried} job lỗi về trạng thái chờ chạy.", "warning")
 
     def _remove_selected_jobs(self) -> None:
         selected = {int(item) for item in self.job_tree.selection()}
@@ -682,7 +1082,7 @@ class GoogleMapsCrawlerApp:
                 "",
                 "end",
                 iid=str(index),
-                values=(job.status, job.query, format_job_limit(job.limit), job.output, job.saved, job.failed),
+                values=(job_status_label(job.status), job.query, format_job_limit(job.limit), job.output, job.saved, job.failed),
             )
 
     def _read_base_options(self, job: jobs.CrawlJob) -> crawler.CrawlOptions:
@@ -691,19 +1091,19 @@ class GoogleMapsCrawlerApp:
             query=job.query,
             limit=job.limit,
             out=output,
-            delay=parse_non_negative_float(self.delay_var.get(), "Delay mỗi nơi"),
-            scroll_pause=parse_non_negative_float(self.scroll_pause_var.get(), "Delay cuộn"),
-            timeout=parse_non_negative_float(self.timeout_var.get(), "Timeout"),
+            delay=parse_non_negative_float(self.delay_var.get(), "Độ trễ mỗi nơi"),
+            scroll_pause=parse_non_negative_float(self.scroll_pause_var.get(), "Độ trễ cuộn"),
+            timeout=parse_non_negative_float(self.timeout_var.get(), "Thời gian chờ tối đa"),
             headless=self.headless_var.get(),
             max_workers=normalize_worker_count(self.worker_count_var.get()),
             output_fields=self._selected_fields(),
-            export_mode=self.export_mode_var.get(),
-            export_format=self.export_format_var.get(),
-            write_mode=self.write_mode_var.get(),
-            split_by=self.split_by_var.get(),
+            export_mode=export_mode_value(self.export_mode_var.get()),
+            export_format=export_format_value(self.export_format_var.get()),
+            write_mode=write_mode_value(self.write_mode_var.get()),
+            split_by=split_mode_value(self.split_by_var.get()),
             job_location=job.location,
             resume_from_existing=self.resume_var.get(),
-            dedupe_mode=self.dedupe_mode_var.get(),
+            dedupe_mode=dedupe_mode_value(self.dedupe_mode_var.get()),
             exclude_keywords=job.exclude_keywords or jobs.split_multi_value(self.exclude_keywords_var.get()),
         )
 
@@ -714,11 +1114,18 @@ class GoogleMapsCrawlerApp:
         self._start_jobs(test_one=True)
 
     def _start_jobs(self, test_one: bool) -> None:
+        try:
+            crawl_jobs = [self._single_job_from_config(limit_override=1)] if test_one else (self.job_queue[:] or [self._single_job_from_config()])
+        except ValueError as exc:
+            messagebox.showerror("Cấu hình chưa hợp lệ", str(exc))
+            return
+        self._start_job_list(crawl_jobs, test_one=test_one)
+
+    def _start_job_list(self, crawl_jobs: list[jobs.CrawlJob], test_one: bool = False) -> None:
         if self.worker_thread and self.worker_thread.is_alive():
             messagebox.showinfo("Đang chạy", "Crawler vẫn đang chạy.")
             return
         try:
-            crawl_jobs = [self._single_job_from_config(limit_override=1)] if test_one else (self.job_queue[:] or [self._single_job_from_config()])
             for job in crawl_jobs:
                 if job.limit < 0:
                     raise ValueError("Số lượng phải là ALL hoặc lớn hơn 0.")
@@ -741,14 +1148,14 @@ class GoogleMapsCrawlerApp:
     def _pause(self) -> None:
         self.pause_event.set()
         self.status_var.set("Tạm dừng")
-        self._append_log("Đã yêu cầu pause. Crawler sẽ dừng giữa các địa điểm.", "warning")
+        self._append_log("Đã yêu cầu tạm dừng. Crawler sẽ dừng giữa các địa điểm.", "warning")
         self.pause_button.configure(state="disabled")
         self.resume_button.configure(state="normal")
 
     def _resume(self) -> None:
         self.pause_event.clear()
         self.status_var.set("Đang chạy")
-        self._append_log("Đã resume.", "success")
+        self._append_log("Đã tiếp tục.", "success")
         self.pause_button.configure(state="normal")
         self.resume_button.configure(state="disabled")
 
@@ -766,8 +1173,8 @@ class GoogleMapsCrawlerApp:
                     break
                 job.status = "running"
                 self.log_queue.put(("job_update", None))
-                self.log_queue.put(("log", (f"Job {index}/{len(job_options)}: {options.query}", "info")))
-                self.log_queue.put(("log", (f"Output: {options.out}", "info")))
+                self.log_queue.put(("log", (f"Job {index}/{len(job_options)} - Câu tìm kiếm: {options.query}", "info")))
+                self.log_queue.put(("log", (f"File xuất: {options.out}", "info")))
                 places = crawler.run_crawl(options, progress=self._queue_log, stop_event=self.stop_event, pause_event=self.pause_event)
                 job.status = "done"
                 job.done = len(places)
@@ -876,6 +1283,7 @@ class GoogleMapsCrawlerApp:
             "location": self.location_var.get(),
             "multi_types": self.multi_types_var.get(),
             "multi_locations": self.multi_locations_var.get(),
+            "category_preset": self.category_preset_var.get(),
             "location_preset": self.location_preset_var.get(),
             "query_template": self.query_template_var.get(),
             "exclude_keywords": self.exclude_keywords_var.get(),
@@ -887,11 +1295,11 @@ class GoogleMapsCrawlerApp:
             "workers": self.worker_count_var.get(),
             "output": self.output_var.get(),
             "output_template": self.output_template_var.get(),
-            "export_mode": self.export_mode_var.get(),
-            "export_format": self.export_format_var.get(),
-            "write_mode": self.write_mode_var.get(),
-            "split_by": self.split_by_var.get(),
-            "dedupe_mode": self.dedupe_mode_var.get(),
+            "export_mode": export_mode_value(self.export_mode_var.get()),
+            "export_format": export_format_value(self.export_format_var.get()),
+            "write_mode": write_mode_value(self.write_mode_var.get()),
+            "split_by": split_mode_value(self.split_by_var.get()),
+            "dedupe_mode": dedupe_mode_value(self.dedupe_mode_var.get()),
             "resume": self.resume_var.get(),
             "headless": self.headless_var.get(),
             "fields": {field: variable.get() for field, variable in self.field_vars.items()},
@@ -907,6 +1315,7 @@ class GoogleMapsCrawlerApp:
             "location": self.location_var,
             "multi_types": self.multi_types_var,
             "multi_locations": self.multi_locations_var,
+            "category_preset": self.category_preset_var,
             "location_preset": self.location_preset_var,
             "query_template": self.query_template_var,
             "exclude_keywords": self.exclude_keywords_var,
@@ -926,6 +1335,20 @@ class GoogleMapsCrawlerApp:
         for key, variable in mapping.items():
             if key in settings:
                 variable.set(str(settings[key]))
+        if "category_preset" in settings:
+            self.category_preset_var.set(jobs.resolve_preset_name(str(settings["category_preset"]), CATEGORY_PRESETS))
+        if "location_preset" in settings:
+            self.location_preset_var.set(jobs.resolve_preset_name(str(settings["location_preset"]), LOCATION_PRESETS))
+        if "export_mode" in settings:
+            self.export_mode_var.set(label_for_value(EXPORT_MODE_LABELS, export_mode_value(str(settings["export_mode"]))))
+        if "export_format" in settings:
+            self.export_format_var.set(label_for_value(EXPORT_FORMAT_LABELS, export_format_value(str(settings["export_format"]))))
+        if "write_mode" in settings:
+            self.write_mode_var.set(label_for_value(WRITE_MODE_LABELS, write_mode_value(str(settings["write_mode"]))))
+        if "split_by" in settings:
+            self.split_by_var.set(label_for_value(SPLIT_LABELS, split_mode_value(str(settings["split_by"]))))
+        if "dedupe_mode" in settings:
+            self.dedupe_mode_var.set(label_for_value(DEDUPE_LABELS, dedupe_mode_value(str(settings["dedupe_mode"]))))
         if "resume" in settings:
             self.resume_var.set(bool(settings["resume"]))
         if "headless" in settings:

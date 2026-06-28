@@ -24,8 +24,15 @@ PLACE_TYPES = [
     "nhà hàng",
     "quán ăn",
     "quán cà phê",
+    "cafe",
+    "coffee shop",
     "trà sữa",
     "tiệm bánh",
+    "buffet",
+    "quán chay",
+    "quán hải sản",
+    "cơm văn phòng",
+    "bún phở",
     "quán nhậu",
     "quán bar",
     "karaoke",
@@ -58,7 +65,10 @@ PLACE_TYPES = [
     "cửa hàng thời trang",
     "cửa hàng đặc sản",
     "nhà sách",
+    "điện máy",
+    "cửa hàng điện thoại",
     "hiệu thuốc",
+    "nhà thuốc",
     "bệnh viện",
     "phòng khám",
     "nha khoa",
@@ -66,6 +76,9 @@ PLACE_TYPES = [
     "ATM",
     "trạm xăng",
     "bãi đỗ xe",
+    "gara ô tô",
+    "rửa xe",
+    "sửa xe máy",
     "sân bay",
     "ga tàu",
     "bến xe",
@@ -80,11 +93,13 @@ PLACE_TYPES = [
 ]
 
 CATEGORY_PRESETS = {
-    "Du lich": [
+    "Du lịch": [
         "khách sạn",
         "resort",
         "homestay",
         "villa",
+        "nhà nghỉ",
+        "hostel",
         "điểm tham quan",
         "bãi biển",
         "bảo tàng",
@@ -92,8 +107,18 @@ CATEGORY_PRESETS = {
         "di tích lịch sử",
         "chùa",
         "tour du lịch",
+        "công ty du lịch",
     ],
-    "An uong": [
+    "Lưu trú": [
+        "khách sạn",
+        "resort",
+        "homestay",
+        "villa",
+        "căn hộ dịch vụ",
+        "nhà nghỉ",
+        "hostel",
+    ],
+    "Ăn uống": [
         "nhà hàng",
         "quán ăn",
         "quán cà phê",
@@ -101,15 +126,38 @@ CATEGORY_PRESETS = {
         "tiệm bánh",
         "quán nhậu",
         "quán bar",
+        "karaoke",
     ],
-    "Y te": [
+    "Cà phê - trà sữa": [
+        "quán cà phê",
+        "cafe",
+        "coffee shop",
+        "trà sữa",
+        "tiệm bánh",
+    ],
+    "Giải trí": [
+        "karaoke",
+        "quán bar",
+        "rạp chiếu phim",
+        "khu vui chơi",
+        "công viên",
+        "gym",
+    ],
+    "Làm đẹp - chăm sóc": [
+        "spa",
+        "massage",
+        "salon tóc",
+        "nha khoa",
+        "gym",
+    ],
+    "Y tế": [
         "bệnh viện",
         "phòng khám",
         "hiệu thuốc",
         "nha khoa",
         "spa",
     ],
-    "Mua sam": [
+    "Mua sắm": [
         "chợ",
         "trung tâm thương mại",
         "siêu thị",
@@ -119,7 +167,7 @@ CATEGORY_PRESETS = {
         "cửa hàng đặc sản",
         "nhà sách",
     ],
-    "Van tai": [
+    "Vận tải": [
         "sân bay",
         "ga tàu",
         "bến xe",
@@ -130,6 +178,43 @@ CATEGORY_PRESETS = {
         "taxi",
         "trạm xăng",
         "bãi đỗ xe",
+    ],
+    "Dịch vụ xe": [
+        "trạm xăng",
+        "bãi đỗ xe",
+        "thuê xe máy",
+        "thuê ô tô",
+        "taxi",
+    ],
+    "Tài chính": [
+        "ngân hàng",
+        "ATM",
+    ],
+    "Giáo dục": [
+        "trường học",
+        "đại học",
+        "nhà sách",
+        "coworking space",
+    ],
+    "Điểm tham quan": [
+        "điểm tham quan",
+        "bảo tàng",
+        "công viên",
+        "di tích lịch sử",
+        "cầu",
+    ],
+    "Tôn giáo": [
+        "chùa",
+        "nhà thờ",
+        "đền",
+    ],
+    "Thiên nhiên": [
+        "bãi biển",
+        "núi",
+        "thác nước",
+        "hồ",
+        "đảo",
+        "công viên",
     ],
 }
 
@@ -223,12 +308,74 @@ CENTRAL_CITY_LOCATIONS = [
     "Huế",
 ]
 
+MAJOR_CITY_LOCATIONS = [
+    "Hà Nội",
+    "TP. Hồ Chí Minh",
+    "Đà Nẵng",
+    "Hải Phòng",
+    "Cần Thơ",
+    "Huế",
+    "Nha Trang",
+    "Đà Lạt",
+    "Hội An",
+    "Hạ Long",
+    "Vũng Tàu",
+    "Phú Quốc",
+]
+
+BEACH_TOURISM_LOCATIONS = [
+    "Hạ Long",
+    "Cát Bà",
+    "Sầm Sơn",
+    "Cửa Lò",
+    "Đà Nẵng",
+    "Hội An",
+    "Quy Nhơn",
+    "Tuy Hòa",
+    "Nha Trang",
+    "Cam Ranh",
+    "Mũi Né",
+    "Vũng Tàu",
+    "Phú Quốc",
+    "Côn Đảo",
+]
+
+NORTHWEST_LOCATIONS = ["Lai Châu", "Điện Biên", "Sơn La", "Lào Cai", "Sa Pa", "Mộc Châu"]
+NORTHEAST_LOCATIONS = ["Cao Bằng", "Lạng Sơn", "Quảng Ninh", "Tuyên Quang", "Thái Nguyên", "Hà Giang"]
+NORTH_CENTRAL_LOCATIONS = ["Thanh Hóa", "Nghệ An", "Hà Tĩnh", "Quảng Trị", "Huế"]
+SOUTH_CENTRAL_COAST_LOCATIONS = ["Đà Nẵng", "Hội An", "Quảng Ngãi", "Quy Nhơn", "Tuy Hòa", "Khánh Hòa", "Nha Trang"]
+CENTRAL_HIGHLANDS_LOCATIONS = ["Gia Lai", "Đắk Lắk", "Lâm Đồng", "Đà Lạt", "Buôn Ma Thuột"]
+SOUTHEAST_LOCATIONS = ["TP. Hồ Chí Minh", "Đồng Nai", "Tây Ninh", "Vũng Tàu", "Bình Dương"]
+MEKONG_DELTA_LOCATIONS = ["Cần Thơ", "Đồng Tháp", "An Giang", "Vĩnh Long", "Cà Mau", "Mỹ Tho", "Bến Tre"]
+
 LOCATION_PRESETS = {
-    "Toan quoc": VIETNAM_LOCATIONS,
-    "Mien Bac": NORTHERN_LOCATIONS,
-    "Mien Trung": CENTRAL_LOCATIONS,
-    "Mien Nam": SOUTHERN_LOCATIONS,
-    "Thanh pho truc thuoc TW": CENTRAL_CITY_LOCATIONS,
+    "Toàn quốc": VIETNAM_LOCATIONS,
+    "Miền Bắc": NORTHERN_LOCATIONS,
+    "Miền Trung": CENTRAL_LOCATIONS,
+    "Miền Nam": SOUTHERN_LOCATIONS,
+    "Thành phố trực thuộc TW": CENTRAL_CITY_LOCATIONS,
+    "Đô thị lớn": MAJOR_CITY_LOCATIONS,
+    "Du lịch biển": BEACH_TOURISM_LOCATIONS,
+    "Tây Bắc": NORTHWEST_LOCATIONS,
+    "Đông Bắc": NORTHEAST_LOCATIONS,
+    "Bắc Trung Bộ": NORTH_CENTRAL_LOCATIONS,
+    "Duyên hải miền Trung": SOUTH_CENTRAL_COAST_LOCATIONS,
+    "Tây Nguyên": CENTRAL_HIGHLANDS_LOCATIONS,
+    "Đông Nam Bộ": SOUTHEAST_LOCATIONS,
+    "Đồng bằng sông Cửu Long": MEKONG_DELTA_LOCATIONS,
+}
+
+PRESET_ALIASES = {
+    "Du lich": "Du lịch",
+    "An uong": "Ăn uống",
+    "Y te": "Y tế",
+    "Mua sam": "Mua sắm",
+    "Van tai": "Vận tải",
+    "Toan quoc": "Toàn quốc",
+    "Mien Bac": "Miền Bắc",
+    "Mien Trung": "Miền Trung",
+    "Mien Nam": "Miền Nam",
+    "Thanh pho truc thuoc TW": "Thành phố trực thuộc TW",
 }
 
 @dataclass
@@ -259,6 +406,13 @@ def compact_spaces(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
 
 
+def resolve_preset_name(preset_name: str | None, presets: Mapping[str, Sequence[str]]) -> str:
+    preset = compact_spaces(preset_name or "")
+    if preset in presets:
+        return preset
+    return PRESET_ALIASES.get(preset, preset)
+
+
 def split_multi_value(value: str | Sequence[str] | None) -> list[str]:
     if value is None:
         return []
@@ -269,8 +423,13 @@ def split_multi_value(value: str | Sequence[str] | None) -> list[str]:
     return [compact_spaces(part) for part in parts if compact_spaces(part)]
 
 
+def categories_for_preset(preset_name: str | None) -> list[str]:
+    preset = resolve_preset_name(preset_name, CATEGORY_PRESETS)
+    return list(CATEGORY_PRESETS.get(preset, []))
+
+
 def locations_for_preset(preset_name: str | None, manual_locations: str | Sequence[str] | None = None) -> list[str]:
-    preset = compact_spaces(preset_name or "")
+    preset = resolve_preset_name(preset_name, LOCATION_PRESETS)
     if preset in LOCATION_PRESETS:
         return list(LOCATION_PRESETS[preset])
     return split_multi_value(manual_locations)

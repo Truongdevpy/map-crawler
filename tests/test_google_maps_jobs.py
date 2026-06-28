@@ -90,22 +90,24 @@ class GoogleMapsJobsTests(unittest.TestCase):
         self.assertEqual(settings["delay"], 2.5)
 
     def test_category_presets_include_requested_groups(self):
-        for name in ("Du lich", "An uong", "Y te", "Mua sam", "Van tai"):
+        for name in ("Du lịch", "Ăn uống", "Y tế", "Mua sắm", "Vận tải", "Cà phê - trà sữa", "Lưu trú", "Thiên nhiên"):
             self.assertIn(name, jobs.CATEGORY_PRESETS)
             self.assertGreater(len(jobs.CATEGORY_PRESETS[name]), 1)
+        self.assertEqual(jobs.categories_for_preset("Du lich"), jobs.CATEGORY_PRESETS["Du lịch"])
 
     def test_location_presets_include_nationwide_and_regions(self):
-        for name in ("Toan quoc", "Mien Bac", "Mien Trung", "Mien Nam", "Thanh pho truc thuoc TW"):
+        for name in ("Toàn quốc", "Miền Bắc", "Miền Trung", "Miền Nam", "Thành phố trực thuộc TW", "Đô thị lớn", "Du lịch biển"):
             self.assertIn(name, jobs.LOCATION_PRESETS)
             self.assertGreater(len(jobs.LOCATION_PRESETS[name]), 1)
 
-        nationwide = jobs.locations_for_preset("Toan quoc")
+        nationwide = jobs.locations_for_preset("Toàn quốc")
 
         self.assertEqual(len(nationwide), 34)
         self.assertEqual(len(nationwide), len(set(nationwide)))
         self.assertIn("Hà Nội", nationwide)
         self.assertIn("TP. Hồ Chí Minh", nationwide)
         self.assertIn("Đà Nẵng", nationwide)
+        self.assertEqual(jobs.locations_for_preset("Toan quoc"), nationwide)
 
     def test_locations_for_preset_falls_back_to_manual_locations(self):
         self.assertEqual(
