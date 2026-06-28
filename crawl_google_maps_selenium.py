@@ -246,8 +246,97 @@ def clean_maps_url(url: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
 
 
-def strip_label_prefix(value: str) -> str:
-    return re.sub(r"^\s*(address|dia chi|dja chi|địa chỉ)\s*:\s*", "", value, flags=re.I).strip()
+ADDRESS_LABEL_PREFIXES = ("address", "dia chi", "dja chi", "\u0111\u1ecba ch\u1ec9")
+PHONE_LABEL_PREFIXES = (
+    "phone",
+    "telephone",
+    "tel",
+    "dien thoai",
+    "so dien thoai",
+    "\u0111i\u1ec7n tho\u1ea1i",
+    "s\u1ed1 \u0111i\u1ec7n tho\u1ea1i",
+)
+WEBSITE_LABEL_PREFIXES = ("website", "web", "trang web")
+HOURS_LABEL_PREFIXES = ("hours", "opening hours", "open hours", "gio mo cua", "\u0111\u1ed3ng h\u1ed3", "gi\u1edd m\u1edf c\u1eeda")
+CATEGORY_LABEL_PREFIXES = ("category", "danh muc", "loai hinh", "lo\u1ea1i h\u00ecnh", "danh m\u1ee5c")
+
+DETAIL_VALUE_ATTRS = (
+    "aria-label",
+    "data-item-id",
+    "data-tooltip",
+    "title",
+    "href",
+    "src",
+    "srcset",
+    "content",
+    "style",
+)
+
+IMAGE_URL_MARKERS = ("googleusercontent", "gstatic", "ggpht", "lh3.googleusercontent")
+
+def strip_label_prefix(value: str, prefixes: Iterable[str] | None = None) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+
+    selected_prefixes = tuple(prefixes or ADDRESS_LABEL_PREFIXES)
+    prefix_values = tuple(strip_accents(prefix).lower().strip() for prefix in selected_prefixes)
+    head, separator, tail = text.partition(":")
+    if separator and len(head) <= 40:
+        normalized_head = strip_accents(head).lower().strip()
+        if any(normalized_head.startswith(prefix) for prefix in prefix_values):
+            return tail.strip()
+
+    normalized_text = strip_accents(text).lower()
+    for prefix in prefix_values:
+        if normalized_text.startswith(prefix + " "):
+            return text.split(None, 1)[1].strip()
+    return text
+
+def element_values(element, attrs: Iterable[str] = DETAIL_VALUE_ATTRS) -> list[str]:
+    values: list[str] = []
+    try:
+        text = (element.text or "").strip()
+        if text:
+            values.append(text)
+    except Exception:
+        pass
+
+    for attr in attrs:
+        try:
+            value = (element.get_attribute(attr) or "").strip()
+            if value:
+                values.append(value)
+        except Exception:
+            continue
+
+    cleaned_values: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        normalized = re.sub(r"\s+", " ", str(value or "")).strip()
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            cleaned_values.append(normalized)
+    return cleaned_values
+
+def iter_element_values(
+    driver,
+    selectors: Iterable[str],
+    attrs: Iterable[str] = DETAIL_VALUE_ATTRS,
+) -> Iterable[str]:
+    from selenium.webdriver.common.by import By
+
+    seen: set[str] = set()
+    for selector in selectors:
+        try:
+            elements = driver.find_elements(By.CSS_SELECTOR, selector)
+        except Exception:
+            continue
+        for element in elements:
+            for value in element_values(element, attrs):
+                if value not in seen:
+                    seen.add(value)
+                    yield value
 
 
 def strip_accents(value: str) -> str:
@@ -332,19 +421,41 @@ def parse_phone_number(text: str) -> str:
 
 
 def extract_url_from_text(text: str) -> str:
-    value = str(text or "").strip()
+    value = strip_label_prefix(str(text or "").strip(), WEBSITE_LABEL_PREFIXES)
     if not value:
         return ""
     match = re.search(r"https?://[^\s,;]+", value)
     if match:
         return match.group(0).rstrip(").,;")
     if value.startswith("www."):
-        return value
+        return "https://" + value.rstrip(").,;")
+    domain_match = re.search(
+        r"\b((?:[a-z0-9-]+\.)+(?:com\.vn|net\.vn|org\.vn|edu\.vn|gov\.vn|com|net|org|edu|gov|info|biz|io|co|vn)(?:/[^\s,;)]*)?)",
+        value,
+        flags=re.I,
+    )
+    if domain_match:
+        return "https://" + domain_match.group(1).rstrip(").,;")
     return ""
 
 def is_google_maps_url(url: str) -> bool:
     lowered = str(url or "").lower()
     return "google.com/maps" in lowered or "maps.google." in lowered
+
+def is_probable_image_url(url: str) -> bool:
+    lowered = str(url or "").lower()
+    if not lowered or lowered.startswith("data:"):
+        return False
+    if any(marker in lowered for marker in IMAGE_URL_MARKERS):
+        return True
+    return bool(re.search(r"\.(?:jpg|jpeg|png|webp)(?:[?#].*)?$", lowered))
+
+def extract_image_url_from_text(text: str) -> str:
+    for raw in re.findall(r"https?://[^\s\"')>,]+", str(text or "")):
+        url = raw.rstrip(").,;")
+        if is_probable_image_url(url):
+            return url
+    return ""
 
 def has_price_marker(text: str) -> bool:
     normalized = text.lower().replace("\xa0", " ")
@@ -876,14 +987,21 @@ def wait_for_detail_fields(driver, timeout: float) -> None:
 
     selectors = (
         '[data-item-id="address"]',
+        '[data-item-id*="address"]',
         '[data-item-id^="phone:tel:"]',
         '[data-item-id="authority"]',
+        'a[href^="tel:"]',
+        'a[href^="http"]',
         'button[aria-label^="Address:"]',
         'button[aria-label^="Địa chỉ:"]',
         'button[aria-label^="Phone:"]',
         'button[aria-label^="Điện thoại:"]',
+        'button[aria-label*="Số điện thoại"]',
         'a[aria-label*="Website"]',
         'a[aria-label*="Trang web"]',
+        '[aria-label*="Giờ mở cửa"]',
+        '[aria-label*="Hours"]',
+        'meta[property="og:image"]',
     )
     wait_seconds = max(1.0, min(float(timeout), 4.0))
     try:
@@ -1035,15 +1153,7 @@ def scrape_place(driver, result: ResultLink, timeout: float) -> Place:
     wait_for_detail_fields(driver, timeout)
 
     name = first_text(driver, ("h1.DUwDvf", "h1")) or result.name_hint
-    category = first_text(
-        driver,
-        (
-            'button[jsaction*="pane.rating.category"]',
-            "button.DkEaL",
-            'button[aria-label*="Category"]',
-            'button[aria-label*="Danh mục"]',
-        ),
-    )
+    category = extract_category(driver)
 
     rating = extract_rating(driver)
     review_count = extract_review_count(driver)
@@ -1098,6 +1208,29 @@ def scrape_place(driver, result: ResultLink, timeout: float) -> Place:
     place.confidence_score = build_confidence_score(place)
 
     return place
+
+
+def extract_category(driver) -> str:
+    selectors = (
+        'button[jsaction*="pane.rating.category"]',
+        "button.DkEaL",
+        'button[aria-label*="Category"]',
+        'button[aria-label*="Danh mục"]',
+        'button[aria-label*="danh mục"]',
+        'button[data-item-id*="category"]',
+        "button[aria-label], div[aria-label], span[aria-label], a[aria-label]",
+    )
+    for candidate in iter_element_values(driver, selectors, ("aria-label", "data-tooltip", "title")):
+        text = strip_label_prefix(candidate, CATEGORY_LABEL_PREFIXES)
+        normalized = strip_accents(text).lower()
+        if not text or len(text) > 80:
+            continue
+        if any(token in normalized for token in ("review", "danh gia", "rating", "xep hang", "phone", "dien thoai", "website", "trang web", "address", "dia chi")):
+            continue
+        if parse_phone_number(text) or extract_url_from_text(text) or has_price_marker(text):
+            continue
+        return text
+    return first_text(driver, ('button[jsaction*="pane.rating.category"]', "button.DkEaL"))
 
 
 def extract_rating(driver) -> Optional[float]:
@@ -1192,8 +1325,6 @@ def extract_price_range(driver) -> tuple[Optional[int], Optional[int]]:
 
 
 def extract_review_count(driver) -> Optional[int]:
-    from selenium.webdriver.common.by import By
-
     selectors = (
         'span[aria-label*="review"]',
         'span[aria-label*="reviews"]',
@@ -1205,22 +1336,19 @@ def extract_review_count(driver) -> Optional[int]:
         'button[aria-label*="bài đánh giá"]',
         'button[aria-label*="đánh giá"]',
         'button[aria-label*="bÃ i Ä‘Ã¡nh giÃ¡"]',
+        'button[aria-label*="rating"]',
+        'span[aria-label*="rating"]',
         "div.F7nice span",
         "div.F7nice button",
+        "button[aria-label], div[aria-label], span[aria-label], a[aria-label]",
+        "button[aria-label], div[aria-label], a[aria-label]",
     )
     candidates: list[str] = []
 
-    try:
-        for selector in selectors:
-            for element in driver.find_elements(By.CSS_SELECTOR, selector):
-                text = element.text or ""
-                aria = element.get_attribute("aria-label") or ""
-                combined = f"{text} {aria}".strip()
-                lowered = combined.lower()
-                if any(token in lowered for token in ("review", "reviews", "danh gia", "đánh giá", "Ä‘Ã¡nh giÃ¡", "(")):
-                    candidates.append(combined)
-    except Exception:
-        pass
+    for combined in iter_element_values(driver, selectors, ("aria-label", "data-tooltip", "title")):
+        lowered = strip_accents(combined).lower()
+        if any(token in lowered for token in ("review", "reviews", "danh gia", "rating", "xep hang", "(")):
+            candidates.append(combined)
 
     for candidate in candidates:
         count = parse_review_count(candidate)
@@ -1230,8 +1358,6 @@ def extract_review_count(driver) -> Optional[int]:
 
 
 def extract_price_text(driver) -> str:
-    from selenium.webdriver.common.by import By
-
     selectors = (
         "button.fT414d",
         "span.fontTitleLarge.Cbys4b",
@@ -1248,21 +1374,15 @@ def extract_price_text(driver) -> str:
         '[aria-label*="price"]',
         '[aria-label*="VND"]',
         '[aria-label*="₫"]',
+        "button[aria-label], div[aria-label], span[aria-label], a[aria-label]",
+        "[data-tooltip]",
+        "[data-item-id]",
     )
     candidates: list[str] = []
 
-    try:
-        for selector in selectors:
-            for element in driver.find_elements(By.CSS_SELECTOR, selector):
-                text = " ".join(
-                    part.strip()
-                    for part in [element.text, element.get_attribute("aria-label")]
-                    if part and part.strip()
-                )
-                if has_price_marker(text):
-                    candidates.append(text)
-    except Exception:
-        pass
+    for text in iter_element_values(driver, selectors):
+        if has_price_marker(text):
+            candidates.append(text)
 
     return extract_price_text_from_candidates(candidates)
 
@@ -1272,22 +1392,21 @@ def extract_price_range(driver) -> tuple[Optional[int], Optional[int]]:
 
 
 def extract_image_url(driver) -> str:
-    from selenium.webdriver.common.by import By
-
     selectors = (
         'button[aria-label*="Ảnh"] img',
         'button[aria-label*="Photo"] img',
         'img[src*="googleusercontent"]',
+        'img[src*="ggpht"]',
         'img[src*="gstatic"]',
+        'img[srcset]',
+        'meta[property="og:image"]',
+        'meta[name="twitter:image"]',
+        '[style*="background-image"]',
     )
-    for selector in selectors:
-        try:
-            for element in driver.find_elements(By.CSS_SELECTOR, selector):
-                src = (element.get_attribute("src") or "").strip()
-                if src and not src.startswith("data:"):
-                    return src
-        except Exception:
-            continue
+    for value in iter_element_values(driver, selectors, ("src", "srcset", "content", "style", "aria-label", "data-tooltip")):
+        image_url = extract_image_url_from_text(value)
+        if image_url:
+            return image_url
 
     try:
         background = driver.execute_script(
@@ -1301,27 +1420,58 @@ def extract_image_url(driver) -> str:
             return '';
             """
         )
-        return str(background or "").strip()
+        return extract_image_url_from_text(str(background or ""))
     except Exception:
         return ""
 
 
+def looks_like_description_text(text: str) -> bool:
+    value = re.sub(r"\s+", " ", str(text or "")).strip()
+    if len(value) < 30:
+        return False
+    normalized = strip_accents(value).lower()
+    excluded_tokens = (
+        "address",
+        "dia chi",
+        "phone",
+        "dien thoai",
+        "website",
+        "trang web",
+        "review",
+        "danh gia",
+        "rating",
+        "xep hang",
+        "open",
+        "closed",
+        "mo cua",
+        "dong cua",
+        "gio mo cua",
+    )
+    if any(token in normalized for token in excluded_tokens):
+        return False
+    if parse_phone_number(value) or extract_url_from_text(value) or has_price_marker(value):
+        return False
+    return not re.fullmatch(r"\d+(\.\d+)?", value)
+
 def extract_description(driver) -> str:
     selectors = (
         '[data-item-id="description"]',
+        '[data-item-id*="description"]',
+        '[aria-label*="Description"]',
+        '[aria-label*="Mô tả"]',
+        '[aria-label*="Giới thiệu"]',
         "div.PYvSYb",
         "div.WeS02d",
         "div.m6QErb .fontBodyMedium",
     )
-    text = first_text(driver, selectors)
-    if text and len(text) > 30 and not re.search(r"^\d+(\.\d+)?$", text):
-        return text
+    for text in iter_element_values(driver, selectors, ("aria-label", "data-tooltip", "title")):
+        text = strip_label_prefix(text, ("description", "mo ta", "mô tả", "gioi thieu", "giới thiệu"))
+        if looks_like_description_text(text):
+            return text
     return ""
 
 
 def extract_phone(driver) -> str:
-    from selenium.webdriver.common.by import By
-
     selectors = (
         '[data-item-id^="phone:tel:"] .Io6YTe',
         '[data-item-id^="phone:tel:"]',
@@ -1333,31 +1483,17 @@ def extract_phone(driver) -> str:
         'button[aria-label*="Phone"]',
         'button[aria-label*="Điện thoại"]',
         'button[aria-label*="Số điện thoại"]',
+        'a[aria-label*="Phone"]',
+        'a[aria-label*="Điện thoại"]',
+        "button[aria-label], div[aria-label], a[aria-label]",
+        "button[aria-label], div[aria-label]",
+        "[data-tooltip]",
     )
     candidates: list[str] = []
-    try:
-        for selector in selectors:
-            for element in driver.find_elements(By.CSS_SELECTOR, selector):
-                candidates.extend(
-                    [
-                        element.text or "",
-                        element.get_attribute("aria-label") or "",
-                        element.get_attribute("data-item-id") or "",
-                        element.get_attribute("href") or "",
-                    ]
-                )
-    except Exception:
-        pass
-
-    try:
-        for selector in ("button[aria-label], div[aria-label]", "button[aria-label], div[aria-label], a[aria-label]"):
-            for element in driver.find_elements(By.CSS_SELECTOR, selector):
-                label = element.get_attribute("aria-label") or ""
-                lowered = strip_accents(label).lower()
-                if any(token in lowered for token in ("phone", "dien thoai", "so dien thoai")):
-                    candidates.append(label)
-    except Exception:
-        pass
+    for value in iter_element_values(driver, selectors):
+        lowered = strip_accents(value).lower()
+        if any(token in lowered for token in ("phone", "dien thoai", "so dien thoai", "tel:")) or parse_phone_number(value):
+            candidates.append(strip_label_prefix(value, PHONE_LABEL_PREFIXES))
 
     for candidate in candidates:
         phone = parse_phone_number(candidate)
@@ -1367,8 +1503,6 @@ def extract_phone(driver) -> str:
 
 
 def extract_website(driver) -> str:
-    from selenium.webdriver.common.by import By
-
     selectors = (
         'a[data-item-id="authority"]',
         '[data-item-id="authority"] a',
@@ -1377,30 +1511,16 @@ def extract_website(driver) -> str:
         'a[aria-label*="Trang web"]',
         'a[aria-label*="website"]',
         'a[aria-label*="trang web"]',
+        'a[href^="http"]',
+        "button[aria-label], div[aria-label], a[aria-label]",
+        "button[aria-label], div[aria-label]",
+        "[data-tooltip]",
     )
     candidates: list[str] = []
-    try:
-        for selector in selectors:
-            for element in driver.find_elements(By.CSS_SELECTOR, selector):
-                candidates.extend(
-                    [
-                        element.get_attribute("href") or "",
-                        element.get_attribute("aria-label") or "",
-                        element.text or "",
-                    ]
-                )
-    except Exception:
-        pass
-
-    try:
-        for selector in ("button[aria-label], div[aria-label]", "button[aria-label], div[aria-label], a[aria-label]"):
-            for element in driver.find_elements(By.CSS_SELECTOR, selector):
-                label = element.get_attribute("aria-label") or ""
-                lowered = strip_accents(label).lower()
-                if any(token in lowered for token in ("website", "trang web")):
-                    candidates.append(label)
-    except Exception:
-        pass
+    for value in iter_element_values(driver, selectors):
+        lowered = strip_accents(value).lower()
+        if any(token in lowered for token in ("website", "trang web", "http://", "https://", "www.")) or extract_url_from_text(value):
+            candidates.append(strip_label_prefix(value, WEBSITE_LABEL_PREFIXES))
 
     for candidate in candidates:
         website = extract_url_from_text(candidate)
@@ -1414,33 +1534,29 @@ def extract_open_hours(driver) -> str:
 
 
 def extract_suitable_time(driver) -> str:
-    from selenium.webdriver.common.by import By
-
     selectors = (
         '[data-item-id*="oh"]',
         '[aria-label*="Giờ mở cửa"]',
+        '[aria-label*="giờ mở cửa"]',
         '[aria-label*="Hours"]',
         '[aria-label*="Open"]',
+        '[aria-label*="Closed"]',
+        "button[aria-label], div[aria-label], span[aria-label], a[aria-label]",
+        "button[aria-label], div[aria-label], a[aria-label]",
+        "[data-tooltip]",
     )
-    try:
-        for selector in selectors:
-            for element in driver.find_elements(By.CSS_SELECTOR, selector):
-                text = " ".join(
-                    part.strip()
-                    for part in [element.text, element.get_attribute("aria-label")]
-                    if part and part.strip()
-                )
-                if any(token in text.lower() for token in ("mở cửa", "đóng cửa", "open", "closed", "24")):
-                    return re.sub(r"\s+", " ", text).strip()
-    except Exception:
-        pass
+    for text in iter_element_values(driver, selectors):
+        lowered = strip_accents(text).lower()
+        if any(token in lowered for token in ("mo cua", "dong cua", "gio mo cua", "open", "closed", "hours", "24")):
+            cleaned = strip_label_prefix(text, HOURS_LABEL_PREFIXES)
+            return re.sub(r"\s+", " ", cleaned).strip()
     return ""
 
 
 def extract_address(driver) -> str:
     from selenium.webdriver.common.by import By
 
-    address = first_text(driver, ('[data-item-id="address"] .Io6YTe',))
+    address = first_text(driver, ('[data-item-id="address"] .Io6YTe', '[data-item-id="address"]', '[data-item-id*="address"]'))
     if address:
         return address
 
@@ -1448,6 +1564,7 @@ def extract_address(driver) -> str:
         driver,
         (
             '[data-item-id="address"]',
+            '[data-item-id*="address"]',
             'button[aria-label^="Address:"]',
             'button[aria-label^="Địa chỉ:"]',
         ),
@@ -1457,10 +1574,12 @@ def extract_address(driver) -> str:
         return strip_label_prefix(aria_address)
 
     try:
-        for element in driver.find_elements(By.CSS_SELECTOR, "button[aria-label], div[aria-label]"):
-            label = element.get_attribute("aria-label") or ""
-            if label.lower().startswith(("address:", "địa chỉ:")):
-                return strip_label_prefix(label)
+        for selector in ("button[aria-label], div[aria-label], a[aria-label]", "button[aria-label], div[aria-label]"):
+            for element in driver.find_elements(By.CSS_SELECTOR, selector):
+                label = " ".join(element_values(element, ("aria-label", "data-tooltip", "title")))
+                lowered = strip_accents(label).lower()
+                if any(lowered.startswith(prefix + ":") for prefix in ("address", "dia chi", "dja chi")):
+                    return strip_label_prefix(label)
     except Exception:
         pass
 

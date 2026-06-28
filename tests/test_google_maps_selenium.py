@@ -239,6 +239,27 @@ class GoogleMapsParserTests(unittest.TestCase):
         self.assertEqual(gm.extract_phone(driver), "0901234567")
         self.assertEqual(gm.extract_website(driver), "https://spa.example.vn")
 
+    def test_extract_detail_fields_from_broader_google_maps_fallbacks(self):
+        driver = FakeDriver({
+            '[data-item-id="address"]': [
+                FakeElement("123 \u0110\u01b0\u1eddng L\u00e1ng, \u0110\u1ed1ng \u0110a, H\u00e0 N\u1ed9i"),
+            ],
+            "button[aria-label], div[aria-label], a[aria-label]": [
+                FakeElement("", **{"aria-label": "Website: cafe-example.vn"}),
+                FakeElement("", **{"aria-label": "Gi\u1edd m\u1edf c\u1eeda: M\u1edf c\u1eeda 24 gi\u1edd"}),
+                FakeElement("", **{"aria-label": "104 b\u00e0i \u0111\u00e1nh gi\u00e1"}),
+            ],
+            'meta[property="og:image"]': [
+                FakeElement("", content="https://lh3.googleusercontent.com/place-photo=w408-h306-k-no"),
+            ],
+        })
+
+        self.assertEqual(gm.extract_address(driver), "123 \u0110\u01b0\u1eddng L\u00e1ng, \u0110\u1ed1ng \u0110a, H\u00e0 N\u1ed9i")
+        self.assertEqual(gm.extract_website(driver), "https://cafe-example.vn")
+        self.assertEqual(gm.extract_open_hours(driver), "M\u1edf c\u1eeda 24 gi\u1edd")
+        self.assertEqual(gm.extract_review_count(driver), 104)
+        self.assertEqual(gm.extract_image_url(driver), "https://lh3.googleusercontent.com/place-photo=w408-h306-k-no")
+
     def test_write_places_csv_uses_schema_or_selected_fields(self):
         place = make_place(address="Đà Nẵng", province="Đà Nẵng", district="Hải Châu", ward="")
 
