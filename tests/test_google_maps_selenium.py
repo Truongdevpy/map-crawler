@@ -166,6 +166,9 @@ class GoogleMapsParserTests(unittest.TestCase):
         self.assertEqual(gm.parse_price_range(""), (None, None))
         self.assertEqual(gm.parse_price_range("100.000-250.000 VND"), (100000, 250000))
         self.assertEqual(gm.parse_price_range("581.532 VND 20-21 thg 7"), (581532, 581532))
+        self.assertEqual(gm.parse_price_range("1-100.000 \u0111"), (1, 100000))
+        self.assertEqual(gm.parse_price_range("1-100.000 \u0111/ng\u01b0\u1eddi"), (1, 100000))
+        self.assertEqual(gm.parse_price_range("100.000 \u0111/ng\u01b0\u1eddi"), (100000, 100000))
         self.assertEqual(gm.parse_price_range("100.000-250.000 ₫"), (100000, 250000))
         self.assertEqual(gm.parse_price_range("581.532 ₫ 20-21 thg 7"), (581532, 581532))
         self.assertEqual(gm.parse_price_range("₫₫"), (200000, 500000))
@@ -180,6 +183,10 @@ class GoogleMapsParserTests(unittest.TestCase):
 
     def test_extract_price_text_prefers_money_like_text(self):
         self.assertEqual(gm.extract_price_text_from_candidates(["4,7 (128)", "20-21 thg 7", "581.532 ₫"]), "581.532 ₫")
+        self.assertEqual(
+            gm.extract_price_text_from_candidates(["4,8 (104)", "1-100.000 \u0111/ng\u01b0\u1eddi"]),
+            "1-100.000 \u0111/ng\u01b0\u1eddi",
+        )
         self.assertEqual(gm.extract_price_text_from_candidates(["4,7 (128)", "Price: Moderate"]), "Price: Moderate")
         self.assertEqual(gm.extract_price_text_from_candidates(["4,7 (128)", "20-21 thg 7"]), "")
 

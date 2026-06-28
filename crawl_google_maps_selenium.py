@@ -439,6 +439,8 @@ def price_level_range(level: int, category: str = "") -> tuple[Optional[int], Op
 
 def has_price_marker(text: str) -> bool:
     normalized = text.lower().replace("\xa0", " ")
+    if re.search(r"\d[\d\.,\s-]*\u0111(?:\b|/)", normalized):
+        return True
     if any(marker in normalized for marker in ("\u20ab", "â‚«", "$", "vnd", "vn\u0111", "dong")):
         return True
     if parse_price_level(normalized) is not None:
