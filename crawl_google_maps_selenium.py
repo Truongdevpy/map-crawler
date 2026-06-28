@@ -331,6 +331,21 @@ def parse_phone_number(text: str) -> str:
     return f"{prefix}{digits}"
 
 
+def extract_url_from_text(text: str) -> str:
+    value = str(text or "").strip()
+    if not value:
+        return ""
+    match = re.search(r"https?://[^\s,;]+", value)
+    if match:
+        return match.group(0).rstrip(").,;")
+    if value.startswith("www."):
+        return value
+    return ""
+
+def is_google_maps_url(url: str) -> bool:
+    lowered = str(url or "").lower()
+    return "google.com/maps" in lowered or "maps.google." in lowered
+
 def has_price_marker(text: str) -> bool:
     normalized = text.lower().replace("\xa0", " ")
     if not has_price_marker(normalized):
@@ -357,6 +372,79 @@ def has_price_marker(text: str) -> bool:
     return bool(re.search(r"\b(k|nghin|ngh\u00ecn|nghÃ¬n|tr|trieu|tri\u1ec7u|triá»‡u)\b", normalized))
 
 
+GENERIC_PRICE_LEVEL_RANGES = {
+    1: (0, 200_000),
+    2: (200_000, 500_000),
+    3: (500_000, 1_000_000),
+    4: (1_000_000, 2_000_000),
+}
+
+PRICE_LEVEL_RANGES_BY_CATEGORY = {
+    "cafe": {
+        1: (0, 50_000),
+        2: (50_000, 150_000),
+        3: (150_000, 300_000),
+        4: (300_000, 600_000),
+    },
+    "food": {
+        1: (0, 100_000),
+        2: (100_000, 300_000),
+        3: (300_000, 700_000),
+        4: (700_000, 1_500_000),
+    },
+    "spa": {
+        1: (0, 300_000),
+        2: (300_000, 700_000),
+        3: (700_000, 1_500_000),
+        4: (1_500_000, 3_000_000),
+    },
+    "lodging": GENERIC_PRICE_LEVEL_RANGES,
+}
+
+def parse_price_level(text: str) -> Optional[int]:
+    normalized = str(text or "").lower().replace("\xa0", " ")
+    symbol_count = max(normalized.count("\u20ab"), normalized.count("â‚«"), normalized.count("$"))
+    if symbol_count and not re.search(r"\d", normalized):
+        return min(symbol_count, 4)
+
+    ascii_text = strip_accents(normalized)
+    if not any(token in ascii_text for token in ("price", "gia", "muc gia", "cost", "chi phi")):
+        return None
+
+    if any(token in ascii_text for token in ("very expensive", "rat dat", "gia rat dat")):
+        return 4
+    if any(token in ascii_text for token in ("expensive", "dat", "gia cao")):
+        return 3
+    if any(token in ascii_text for token in ("moderate", "vua phai", "trung binh", "tam trung")):
+        return 2
+    if any(token in ascii_text for token in ("inexpensive", "cheap", "gia re", "binh dan")):
+        return 1
+    return None
+
+def price_level_bucket_for_category(category: str) -> str:
+    normalized = strip_accents(category or "").lower()
+    if any(token in normalized for token in ("ca phe", "coffee", "tra sua", "tiem banh", "bakery")):
+        return "cafe"
+    if any(token in normalized for token in ("spa", "massage", "salon")):
+        return "spa"
+    if any(token in normalized for token in ("nha hang", "quan an", "quan nhau", "quan bar", "bar", "karaoke")):
+        return "food"
+    if any(token in normalized for token in ("khach san", "hotel", "resort", "homestay", "villa", "nha nghi", "hostel", "can ho")):
+        return "lodging"
+    return "generic"
+
+def price_level_range(level: int, category: str = "") -> tuple[Optional[int], Optional[int]]:
+    ranges = PRICE_LEVEL_RANGES_BY_CATEGORY.get(price_level_bucket_for_category(category), GENERIC_PRICE_LEVEL_RANGES)
+    return ranges.get(min(max(int(level), 1), 4), (None, None))
+
+def has_price_marker(text: str) -> bool:
+    normalized = text.lower().replace("\xa0", " ")
+    if any(marker in normalized for marker in ("\u20ab", "â‚«", "$", "vnd", "vn\u0111", "dong")):
+        return True
+    if parse_price_level(normalized) is not None:
+        return True
+    return bool(re.search(r"\b(k|nghin|ngh\u00ecn|nghÃ¬n|tr|trieu|tri\u1ec7u|triá»‡u)\b", normalized))
+
 def extract_price_text_from_candidates(candidates: Iterable[str]) -> str:
     for candidate in candidates:
         text = re.sub(r"\s+", " ", str(candidate or "")).strip()
@@ -364,7 +452,7 @@ def extract_price_text_from_candidates(candidates: Iterable[str]) -> str:
             continue
         price_min, price_max = parse_price_range(text)
         compact = text.replace(" ", "")
-        if price_min is not None or price_max is not None or re.fullmatch(r"[₫$â‚«]{1,4}", compact):
+        if price_min is not None or price_max is not None or parse_price_level(text) is not None or re.fullmatch(r"[₫$â‚«]{1,4}", compact):
             return text
     return ""
 
@@ -513,6 +601,18 @@ def parse_price_range(text: str) -> tuple[Optional[int], Optional[int]]:
         return numbers[0], numbers[0]
     return min(numbers), max(numbers)
 
+
+def parse_price_range_for_category(text: str, category: str = "") -> tuple[Optional[int], Optional[int]]:
+    level = parse_price_level(text)
+    if level is not None and not re.search(r"\d", str(text or "")):
+        return price_level_range(level, category)
+
+    price_min, price_max = parse_price_range(text)
+    if price_min is not None or price_max is not None:
+        return price_min, price_max
+    if level is not None:
+        return price_level_range(level, category)
+    return None, None
 
 def extract_coordinates_from_url(url: str) -> tuple[Optional[float], Optional[float]]:
     at_match = re.search(r"@(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)", url)
@@ -768,6 +868,29 @@ def check_for_block(driver) -> None:
         raise RuntimeError("Google appears to have blocked this browser session.")
 
 
+def wait_for_detail_fields(driver, timeout: float) -> None:
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+
+    selectors = (
+        '[data-item-id="address"]',
+        '[data-item-id^="phone:tel:"]',
+        '[data-item-id="authority"]',
+        'button[aria-label^="Address:"]',
+        'button[aria-label^="Địa chỉ:"]',
+        'button[aria-label^="Phone:"]',
+        'button[aria-label^="Điện thoại:"]',
+        'a[aria-label*="Website"]',
+        'a[aria-label*="Trang web"]',
+    )
+    wait_seconds = max(1.0, min(float(timeout), 4.0))
+    try:
+        WebDriverWait(driver, wait_seconds).until(
+            lambda d: any(d.find_elements(By.CSS_SELECTOR, selector) for selector in selectors)
+        )
+    except Exception:
+        pass
+
 def first_text(driver, selectors: Iterable[str]) -> str:
     from selenium.webdriver.common.by import By
 
@@ -907,6 +1030,7 @@ def scrape_place(driver, result: ResultLink, timeout: float) -> Place:
     check_for_block(driver)
 
     WebDriverWait(driver, timeout).until(lambda d: d.find_elements(By.CSS_SELECTOR, "h1"))
+    wait_for_detail_fields(driver, timeout)
 
     name = first_text(driver, ("h1.DUwDvf", "h1")) or result.name_hint
     category = first_text(
@@ -924,7 +1048,7 @@ def scrape_place(driver, result: ResultLink, timeout: float) -> Place:
     address = extract_address(driver)
     description = extract_description(driver)
     price_text = extract_price_text(driver)
-    price_min, price_max = parse_price_range(price_text)
+    price_min, price_max = parse_price_range_for_category(price_text, category)
     latitude, longitude = extract_coordinates_from_url(driver.current_url or result.maps_url)
     image_url = extract_image_url(driver)
     maps_url = clean_maps_url(driver.current_url or result.maps_url)
@@ -1115,7 +1239,11 @@ def extract_price_text(driver) -> str:
         '[data-item-id*="price"]',
         '[aria-label*="Giá"]',
         '[aria-label*="GiÃ¡"]',
+        '[aria-label*="giá"]',
+        '[aria-label*="Mức giá"]',
+        '[aria-label*="mức giá"]',
         '[aria-label*="Price"]',
+        '[aria-label*="price"]',
         '[aria-label*="VND"]',
         '[aria-label*="₫"]',
     )
@@ -1195,9 +1323,14 @@ def extract_phone(driver) -> str:
     selectors = (
         '[data-item-id^="phone:tel:"] .Io6YTe',
         '[data-item-id^="phone:tel:"]',
+        'button[data-item-id^="phone:tel:"]',
+        'a[href^="tel:"]',
         'button[aria-label^="Phone:"]',
         'button[aria-label^="Điện thoại:"]',
         'button[aria-label^="Số điện thoại:"]',
+        'button[aria-label*="Phone"]',
+        'button[aria-label*="Điện thoại"]',
+        'button[aria-label*="Số điện thoại"]',
     )
     candidates: list[str] = []
     try:
@@ -1208,8 +1341,19 @@ def extract_phone(driver) -> str:
                         element.text or "",
                         element.get_attribute("aria-label") or "",
                         element.get_attribute("data-item-id") or "",
+                        element.get_attribute("href") or "",
                     ]
                 )
+    except Exception:
+        pass
+
+    try:
+        for selector in ("button[aria-label], div[aria-label]", "button[aria-label], div[aria-label], a[aria-label]"):
+            for element in driver.find_elements(By.CSS_SELECTOR, selector):
+                label = element.get_attribute("aria-label") or ""
+                lowered = strip_accents(label).lower()
+                if any(token in lowered for token in ("phone", "dien thoai", "so dien thoai")):
+                    candidates.append(label)
     except Exception:
         pass
 
@@ -1226,17 +1370,40 @@ def extract_website(driver) -> str:
     selectors = (
         'a[data-item-id="authority"]',
         '[data-item-id="authority"] a',
+        '[data-item-id="authority"]',
         'a[aria-label*="Website"]',
         'a[aria-label*="Trang web"]',
+        'a[aria-label*="website"]',
+        'a[aria-label*="trang web"]',
     )
+    candidates: list[str] = []
     try:
         for selector in selectors:
             for element in driver.find_elements(By.CSS_SELECTOR, selector):
-                href = (element.get_attribute("href") or "").strip()
-                if href and "google.com/maps" not in href:
-                    return href
+                candidates.extend(
+                    [
+                        element.get_attribute("href") or "",
+                        element.get_attribute("aria-label") or "",
+                        element.text or "",
+                    ]
+                )
     except Exception:
         pass
+
+    try:
+        for selector in ("button[aria-label], div[aria-label]", "button[aria-label], div[aria-label], a[aria-label]"):
+            for element in driver.find_elements(By.CSS_SELECTOR, selector):
+                label = element.get_attribute("aria-label") or ""
+                lowered = strip_accents(label).lower()
+                if any(token in lowered for token in ("website", "trang web")):
+                    candidates.append(label)
+    except Exception:
+        pass
+
+    for candidate in candidates:
+        website = extract_url_from_text(candidate)
+        if website and not is_google_maps_url(website):
+            return website
     return ""
 
 

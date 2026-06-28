@@ -8,6 +8,23 @@ from tempfile import TemporaryDirectory
 import crawl_google_maps_selenium as gm
 
 
+class FakeElement:
+    def __init__(self, text="", **attrs):
+        self.text = text
+        self.attrs = attrs
+
+    def get_attribute(self, name):
+        return self.attrs.get(name, "")
+
+
+class FakeDriver:
+    def __init__(self, elements_by_selector):
+        self.elements_by_selector = elements_by_selector
+
+    def find_elements(self, by=None, value=None):
+        return self.elements_by_selector.get(value, [])
+
+
 def make_place(**overrides):
     data = {
         "name": "Khách sạn A",
@@ -155,8 +172,15 @@ class GoogleMapsParserTests(unittest.TestCase):
         self.assertEqual(gm.parse_price_range("4,7 (128)"), (None, None))
         self.assertEqual(gm.parse_price_range("20-21 thg 7"), (None, None))
 
+    def test_parse_price_range_uses_category_level_fallbacks(self):
+        self.assertEqual(gm.parse_price_range_for_category("₫₫", "quán cà phê"), (50_000, 150_000))
+        self.assertEqual(gm.parse_price_range_for_category("Mức giá: vừa phải", "spa"), (300_000, 700_000))
+        self.assertEqual(gm.parse_price_range_for_category("Price: Moderate", "quán cà phê"), (50_000, 150_000))
+        self.assertEqual(gm.parse_price_range_for_category("Price: Moderate", ""), (200_000, 500_000))
+
     def test_extract_price_text_prefers_money_like_text(self):
         self.assertEqual(gm.extract_price_text_from_candidates(["4,7 (128)", "20-21 thg 7", "581.532 ₫"]), "581.532 ₫")
+        self.assertEqual(gm.extract_price_text_from_candidates(["4,7 (128)", "Price: Moderate"]), "Price: Moderate")
         self.assertEqual(gm.extract_price_text_from_candidates(["4,7 (128)", "20-21 thg 7"]), "")
 
     def test_extract_coordinates_from_url_reads_at_segment(self):
@@ -178,6 +202,35 @@ class GoogleMapsParserTests(unittest.TestCase):
     def test_parse_phone_number_accepts_vietnam_formats(self):
         self.assertEqual(gm.parse_phone_number("+84 90 123 4567"), "+84901234567")
         self.assertEqual(gm.parse_phone_number("Điện thoại: 0236 123 456"), "0236123456")
+
+    def test_extract_detail_contact_fields_from_google_maps_buttons(self):
+        driver = FakeDriver({
+            '[data-item-id="address"] .Io6YTe': [FakeElement("123 Cầu Giấy, Hà Nội")],
+            'button[data-item-id^="phone:tel:"]': [
+                FakeElement("", **{"aria-label": "Số điện thoại: 024 1234 5678", "data-item-id": "phone:tel:02412345678"}),
+            ],
+            'a[data-item-id="authority"]': [FakeElement("", href="https://example.com")],
+        })
+
+        self.assertEqual(gm.extract_address(driver), "123 Cầu Giấy, Hà Nội")
+        self.assertEqual(gm.extract_phone(driver), "02412345678")
+        self.assertEqual(gm.extract_website(driver), "https://example.com")
+
+    def test_extract_detail_contact_fields_from_aria_fallbacks(self):
+        driver = FakeDriver({
+            "button[aria-label], div[aria-label]": [
+                FakeElement("", **{"aria-label": "Địa chỉ: 88 Trần Thái Tông, Cầu Giấy"}),
+                FakeElement("", **{"aria-label": "Điện thoại: 090 123 4567"}),
+                FakeElement("", **{"aria-label": "Trang web: https://spa.example.vn"}),
+            ],
+            'a[aria-label*="Website"]': [
+                FakeElement("", href="https://maps.google.com"),
+            ],
+        })
+
+        self.assertEqual(gm.extract_address(driver), "88 Trần Thái Tông, Cầu Giấy")
+        self.assertEqual(gm.extract_phone(driver), "0901234567")
+        self.assertEqual(gm.extract_website(driver), "https://spa.example.vn")
 
     def test_write_places_csv_uses_schema_or_selected_fields(self):
         place = make_place(address="Đà Nẵng", province="Đà Nẵng", district="Hải Châu", ward="")
