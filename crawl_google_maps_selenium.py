@@ -82,6 +82,10 @@ SPLIT_LOCATION = "location"
 SPLIT_MODES = (SPLIT_NONE, SPLIT_CATEGORY, SPLIT_LOCATION)
 
 
+ALL_RESULTS_LIMIT = 0
+MAX_ALL_RESULT_LINKS = 5000
+STABLE_RESULT_SCROLL_ROUNDS = 8
+
 @dataclass
 class ResultLink:
     name_hint: str
@@ -668,6 +672,20 @@ def normalize_max_workers(value: int) -> int:
     return max(1, min(3, int(value)))
 
 
+def is_all_results_limit(limit: int) -> bool:
+    return int(limit) == ALL_RESULTS_LIMIT
+
+def result_limit_reached(seen_count: int, limit: int) -> bool:
+    return not is_all_results_limit(limit) and seen_count >= int(limit)
+
+def trim_result_links(links: list[ResultLink], limit: int) -> list[ResultLink]:
+    if is_all_results_limit(limit):
+        return list(links)
+    return list(links)[: int(limit)]
+
+def format_limit_label(limit: int) -> str:
+    return "ALL" if is_all_results_limit(limit) else str(limit)
+
 def chunk_links(links: list[ResultLink], max_workers: int) -> list[list[ResultLink]]:
     worker_count = normalize_max_workers(max_workers)
     chunks: list[list[ResultLink]] = [[] for _ in range(worker_count)]
@@ -778,6 +796,23 @@ def first_attr(driver, selectors: Iterable[str], attr: str) -> str:
     return ""
 
 
+def is_end_of_results_visible(driver) -> bool:
+    from selenium.webdriver.common.by import By
+
+    end_tokens = (
+        "you've reached the end of the list",
+        "you have reached the end of the list",
+        "end of the list",
+        "bạn đã xem hết danh sách",
+        "ban da xem het danh sach",
+        "đã xem hết danh sách",
+    )
+    try:
+        body = driver.find_element(By.CSS_SELECTOR, "body").text.lower()
+    except Exception:
+        return False
+    return any(token in body for token in end_tokens)
+
 def collect_result_links(
     driver,
     query: str,
@@ -806,8 +841,14 @@ def collect_result_links(
 
     seen: dict[str, ResultLink] = {}
     stable_rounds = 0
+    max_links = MAX_ALL_RESULT_LINKS if is_all_results_limit(limit) else max(1, int(limit))
 
-    while len(seen) < limit and stable_rounds < 8 and not stop_requested(stop_event):
+    while (
+        not result_limit_reached(len(seen), limit)
+        and len(seen) < max_links
+        and stable_rounds < STABLE_RESULT_SCROLL_ROUNDS
+        and not stop_requested(stop_event)
+    ):
         before = len(seen)
         anchors = driver.find_elements(By.CSS_SELECTOR, 'a[href*="/maps/place/"]')
 
@@ -822,16 +863,22 @@ def collect_result_links(
             except Exception:
                 continue
 
-        if len(seen) >= limit:
+        if result_limit_reached(len(seen), limit):
+            break
+        if is_end_of_results_visible(driver):
+            emit(progress, f"End of result list detected after {len(seen)} links.")
             break
 
         stable_rounds = stable_rounds + 1 if len(seen) == before else 0
         scroll_result_panel(driver)
         time.sleep(scroll_pause)
         check_for_block(driver)
-        emit(progress, f"Collected {len(seen)} result links...")
+        emit(progress, f"Collected {len(seen)}/{format_limit_label(limit)} result links...")
 
-    return list(seen.values())[:limit]
+    if is_all_results_limit(limit) and len(seen) >= MAX_ALL_RESULT_LINKS:
+        emit(progress, f"Reached safety cap of {MAX_ALL_RESULT_LINKS} result links.")
+
+    return trim_result_links(list(seen.values()), limit)
 
 
 def scroll_result_panel(driver) -> None:
@@ -1649,8 +1696,8 @@ def run_crawl(
     stop_event: object | None = None,
     pause_event: object | None = None,
 ) -> list[Place]:
-    if options.limit < 1:
-        raise ValueError("limit must be at least 1")
+    if options.limit < 0:
+        raise ValueError("limit must be 0 for all results or at least 1")
     if options.export_mode not in EXPORT_MODES:
         raise ValueError(f"export_mode must be one of: {', '.join(EXPORT_MODES)}")
     infer_export_format(options.out, options.export_format)
@@ -1865,7 +1912,8 @@ def run_crawl(
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Crawl basic Google Maps search result data with Selenium.")
     parser.add_argument("query", help="Search keyword, for example: \"khach san Da Nang\"")
-    parser.add_argument("--limit", type=int, default=50, help="Maximum number of places to export.")
+    parser.add_argument("--limit", type=int, default=50, help="Maximum number of places to export. Use 0 for all results found.")
+    parser.add_argument("--all-results", action="store_true", help="Scroll until Google Maps stops returning new places.")
     parser.add_argument("--out", type=Path, default=Path("data/google_maps.csv"), help="Output CSV path.")
     parser.add_argument("--delay", type=float, default=1.5, help="Delay between place pages, in seconds.")
     parser.add_argument("--scroll-pause", type=float, default=1.2, help="Delay between result-list scrolls, in seconds.")
@@ -1930,13 +1978,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
-    if args.limit < 1:
-        log("--limit must be at least 1", error=True)
+    limit = ALL_RESULTS_LIMIT if args.all_results else args.limit
+    if limit < 0:
+        log("--limit must be 0 for all results or at least 1", error=True)
         return 2
 
     options = CrawlOptions(
         query=args.query,
-        limit=args.limit,
+        limit=limit,
         out=args.out,
         delay=args.delay,
         scroll_pause=args.scroll_pause,

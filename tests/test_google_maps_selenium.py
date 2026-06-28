@@ -83,6 +83,17 @@ class GoogleMapsParserTests(unittest.TestCase):
         chunks = gm.chunk_links(links, 2)
         self.assertEqual([[link.name_hint for link in chunk] for chunk in chunks], [["0", "2", "4"], ["1", "3"]])
 
+    def test_all_results_limit_uses_zero_as_unlimited(self):
+        links = [gm.ResultLink(str(index), f"https://example.com/{index}") for index in range(4)]
+
+        self.assertTrue(gm.is_all_results_limit(0))
+        self.assertFalse(gm.is_all_results_limit(3))
+        self.assertFalse(gm.result_limit_reached(100, 0))
+        self.assertTrue(gm.result_limit_reached(3, 3))
+        self.assertEqual(gm.trim_result_links(links, 0), links)
+        self.assertEqual(gm.trim_result_links(links, 2), links[:2])
+        self.assertEqual(gm.format_limit_label(0), "ALL")
+
     def test_schema_fields_match_destination_table(self):
         self.assertEqual(
             gm.SCHEMA_FIELDS,
@@ -303,6 +314,11 @@ class GoogleMapsParserTests(unittest.TestCase):
         self.assertTrue(args.resume)
         self.assertEqual(args.exclude_keywords, "da dong cua,tam ngung")
 
+
+    def test_parse_args_accepts_all_results_mode(self):
+        args = gm.parse_args(["khach san Cau Giay", "--all-results"])
+
+        self.assertTrue(args.all_results)
 
 if __name__ == "__main__":
     unittest.main()

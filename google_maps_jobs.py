@@ -134,6 +134,103 @@ CATEGORY_PRESETS = {
 }
 
 
+VIETNAM_LOCATIONS = [
+    "Hà Nội",
+    "TP. Hồ Chí Minh",
+    "Hải Phòng",
+    "Đà Nẵng",
+    "Cần Thơ",
+    "Huế",
+    "Lai Châu",
+    "Điện Biên",
+    "Sơn La",
+    "Lạng Sơn",
+    "Quảng Ninh",
+    "Thanh Hóa",
+    "Nghệ An",
+    "Hà Tĩnh",
+    "Quảng Trị",
+    "Quảng Ngãi",
+    "Gia Lai",
+    "Khánh Hòa",
+    "Lâm Đồng",
+    "Đắk Lắk",
+    "Đồng Nai",
+    "Tây Ninh",
+    "Đồng Tháp",
+    "An Giang",
+    "Vĩnh Long",
+    "Cà Mau",
+    "Tuyên Quang",
+    "Lào Cai",
+    "Thái Nguyên",
+    "Phú Thọ",
+    "Bắc Ninh",
+    "Hưng Yên",
+    "Ninh Bình",
+    "Cao Bằng",
+]
+
+NORTHERN_LOCATIONS = [
+    "Hà Nội",
+    "Hải Phòng",
+    "Lai Châu",
+    "Điện Biên",
+    "Sơn La",
+    "Cao Bằng",
+    "Lạng Sơn",
+    "Quảng Ninh",
+    "Tuyên Quang",
+    "Lào Cai",
+    "Thái Nguyên",
+    "Phú Thọ",
+    "Bắc Ninh",
+    "Hưng Yên",
+    "Ninh Bình",
+]
+
+CENTRAL_LOCATIONS = [
+    "Huế",
+    "Thanh Hóa",
+    "Nghệ An",
+    "Hà Tĩnh",
+    "Quảng Trị",
+    "Đà Nẵng",
+    "Quảng Ngãi",
+    "Gia Lai",
+    "Khánh Hòa",
+    "Lâm Đồng",
+    "Đắk Lắk",
+]
+
+SOUTHERN_LOCATIONS = [
+    "TP. Hồ Chí Minh",
+    "Cần Thơ",
+    "Đồng Nai",
+    "Tây Ninh",
+    "Đồng Tháp",
+    "An Giang",
+    "Vĩnh Long",
+    "Cà Mau",
+]
+
+CENTRAL_CITY_LOCATIONS = [
+    "Hà Nội",
+    "TP. Hồ Chí Minh",
+    "Hải Phòng",
+    "Đà Nẵng",
+    "Cần Thơ",
+    "Huế",
+]
+
+LOCATION_PRESETS = {
+    "Toan quoc": VIETNAM_LOCATIONS,
+    "Mien Bac": NORTHERN_LOCATIONS,
+    "Mien Trung": CENTRAL_LOCATIONS,
+    "Mien Nam": SOUTHERN_LOCATIONS,
+    "Thanh pho truc thuoc TW": CENTRAL_CITY_LOCATIONS,
+}
+
 @dataclass
 class CrawlJob:
     place_type: str = ""
@@ -171,6 +268,12 @@ def split_multi_value(value: str | Sequence[str] | None) -> list[str]:
         parts = [str(item) for item in value]
     return [compact_spaces(part) for part in parts if compact_spaces(part)]
 
+
+def locations_for_preset(preset_name: str | None, manual_locations: str | Sequence[str] | None = None) -> list[str]:
+    preset = compact_spaces(preset_name or "")
+    if preset in LOCATION_PRESETS:
+        return list(LOCATION_PRESETS[preset])
+    return split_multi_value(manual_locations)
 
 def build_query(template: str, place_type: str, keyword: str, location: str) -> str:
     rendered = (template or QUERY_TEMPLATE).format(
@@ -213,7 +316,7 @@ def expand_jobs(
                         place_type=place_type,
                         keyword=keyword,
                         location=location,
-                        limit=max(1, int(limit)),
+                        limit=max(0, int(limit)),
                         output=output,
                         query_template=query_template,
                     )
@@ -272,7 +375,7 @@ def _import_jobs_csv(path: Path) -> list[CrawlJob]:
 
 def _parse_limit(value: str) -> int:
     try:
-        return max(1, int(str(value).strip()))
+        return max(0, int(str(value).strip()))
     except (TypeError, ValueError):
         return 50
 

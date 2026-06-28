@@ -34,6 +34,16 @@ class GoogleMapsJobsTests(unittest.TestCase):
         ])
         self.assertTrue(all(job.limit == 25 for job in expanded))
 
+    def test_expand_jobs_keeps_zero_limit_for_all_results_mode(self):
+        expanded = jobs.expand_jobs(
+            place_types="khach san",
+            keywords="",
+            locations="Cau Giay",
+            limit=0,
+        )
+
+        self.assertEqual(expanded[0].limit, 0)
+
     def test_import_jobs_from_txt_pipe_format(self):
         with TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "jobs.txt"
@@ -83,6 +93,25 @@ class GoogleMapsJobsTests(unittest.TestCase):
         for name in ("Du lich", "An uong", "Y te", "Mua sam", "Van tai"):
             self.assertIn(name, jobs.CATEGORY_PRESETS)
             self.assertGreater(len(jobs.CATEGORY_PRESETS[name]), 1)
+
+    def test_location_presets_include_nationwide_and_regions(self):
+        for name in ("Toan quoc", "Mien Bac", "Mien Trung", "Mien Nam", "Thanh pho truc thuoc TW"):
+            self.assertIn(name, jobs.LOCATION_PRESETS)
+            self.assertGreater(len(jobs.LOCATION_PRESETS[name]), 1)
+
+        nationwide = jobs.locations_for_preset("Toan quoc")
+
+        self.assertEqual(len(nationwide), 34)
+        self.assertEqual(len(nationwide), len(set(nationwide)))
+        self.assertIn("Hà Nội", nationwide)
+        self.assertIn("TP. Hồ Chí Minh", nationwide)
+        self.assertIn("Đà Nẵng", nationwide)
+
+    def test_locations_for_preset_falls_back_to_manual_locations(self):
+        self.assertEqual(
+            jobs.locations_for_preset("Custom", manual_locations="Đà Nẵng, Hội An"),
+            ["Đà Nẵng", "Hội An"],
+        )
 
     def test_dedupe_places_by_destination_id_and_merge_missing_values(self):
         rows = [

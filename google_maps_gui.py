@@ -23,6 +23,7 @@ SETTINGS_PATH = Path(".google_maps_gui_settings.json")
 PLACE_TYPE_LABEL = "Loại cần lấy (gõ tay hoặc chọn)"
 PLACE_TYPES = jobs.PLACE_TYPES
 CATEGORY_PRESETS = jobs.CATEGORY_PRESETS
+LOCATION_PRESETS = jobs.LOCATION_PRESETS
 
 EXPORT_MODE_LABELS = {
     crawler.EXPORT_MODE_END: "Ghi file khi cào xong",
@@ -121,6 +122,14 @@ def parse_positive_int(value: str, label: str) -> int:
     return number
 
 
+def parse_limit_for_mode(value: str, label: str, all_results: bool = False) -> int:
+    if all_results:
+        return crawler.ALL_RESULTS_LIMIT
+    return parse_positive_int(value, label)
+
+def format_job_limit(limit: int) -> str:
+    return crawler.format_limit_label(limit)
+
 def parse_non_negative_float(value: str, label: str) -> float:
     try:
         number = float(value)
@@ -139,15 +148,19 @@ def build_jobs_from_inputs(
     query_template: str,
     output_template: str = "",
     export_format: str = crawler.EXPORT_FORMAT_CSV,
+    location_preset: str = "",
+    all_results: bool = False,
 ) -> list[jobs.CrawlJob]:
     template = output_template.strip()
     if template and "{date}" not in template:
         template = str(Path(template))
+    location_values = jobs.locations_for_preset(location_preset, locations)
+    effective_limit = crawler.ALL_RESULTS_LIMIT if all_results else limit
     crawl_jobs = jobs.expand_jobs(
         place_types=place_types,
         keywords=keywords,
-        locations=locations,
-        limit=limit,
+        locations=location_values,
+        limit=effective_limit,
         query_template=query_template or jobs.QUERY_TEMPLATE,
         output_template=template,
     )
@@ -223,8 +236,10 @@ class GoogleMapsCrawlerApp:
         self.multi_locations_var = tk.StringVar(value="Đà Nẵng")
         self.query_template_var = tk.StringVar(value=jobs.QUERY_TEMPLATE)
         self.category_preset_var = tk.StringVar(value="")
+        self.location_preset_var = tk.StringVar(value="")
         self.exclude_keywords_var = tk.StringVar(value="đã đóng cửa, tạm ngưng")
         self.limit_var = tk.StringVar(value="50")
+        self.all_results_var = tk.BooleanVar(value=False)
         self.delay_var = tk.StringVar(value="1.5")
         self.scroll_pause_var = tk.StringVar(value="1.2")
         self.timeout_var = tk.StringVar(value="20")
@@ -252,6 +267,7 @@ class GoogleMapsCrawlerApp:
         self.pause_button: ttk.Button
         self.resume_button: ttk.Button
         self.stop_button: ttk.Button
+        self.limit_spinbox: ttk.Spinbox
         self.type_box: ttk.Combobox
         self.query_preview: ttk.Label
         self.log_text: tk.Text
@@ -260,6 +276,7 @@ class GoogleMapsCrawlerApp:
 
         self._load_settings()
         self._build_ui()
+        self._refresh_limit_state()
         self._refresh_query_preview()
         self._refresh_job_tree()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -341,7 +358,17 @@ class GoogleMapsCrawlerApp:
         ttk.Entry(parent, textvariable=self.keyword_var).grid(row=1, column=1, sticky="ew", padx=(8, 18), pady=5)
 
         self._add_label(parent, "Số lượng/job", 1, 2)
-        ttk.Spinbox(parent, from_=1, to=5000, textvariable=self.limit_var, width=12).grid(row=1, column=3, sticky="ew", padx=(8, 0), pady=5)
+        limit_frame = ttk.Frame(parent)
+        limit_frame.grid(row=1, column=3, sticky="ew", padx=(8, 0), pady=5)
+        limit_frame.columnconfigure(0, weight=1)
+        self.limit_spinbox = ttk.Spinbox(limit_frame, from_=1, to=5000, textvariable=self.limit_var, width=12)
+        self.limit_spinbox.grid(row=0, column=0, sticky="ew")
+        ttk.Checkbutton(
+            limit_frame,
+            text="Cào hết kết quả tìm thấy",
+            variable=self.all_results_var,
+            command=self._refresh_limit_state,
+        ).grid(row=0, column=1, sticky="w", padx=(10, 0))
 
         self._add_label(parent, "Template query", 2, 0)
         ttk.Entry(parent, textvariable=self.query_template_var).grid(row=2, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=5)
@@ -357,38 +384,43 @@ class GoogleMapsCrawlerApp:
         preset_box.grid(row=4, column=1, sticky="ew", padx=(8, 18), pady=5)
         ttk.Button(parent, text="Áp dụng preset", command=self._apply_category_preset).grid(row=4, column=2, sticky="ew", padx=(0, 8), pady=5)
 
-        self._add_label(parent, "Exclude keywords", 4, 3)
-        ttk.Entry(parent, textvariable=self.exclude_keywords_var).grid(row=5, column=3, sticky="ew", padx=(8, 0), pady=5)
+        self._add_label(parent, "Preset vùng", 5, 0)
+        location_preset_box = ttk.Combobox(parent, textvariable=self.location_preset_var, values=[""] + list(LOCATION_PRESETS), state="readonly")
+        location_preset_box.grid(row=5, column=1, sticky="ew", padx=(8, 18), pady=5)
+        ttk.Button(parent, text="Áp dụng vùng", command=self._apply_location_preset).grid(row=5, column=2, sticky="ew", padx=(0, 8), pady=5)
 
-        self._add_label(parent, "File output", 5, 0)
-        ttk.Entry(parent, textvariable=self.output_var).grid(row=5, column=1, sticky="ew", padx=(8, 18), pady=5)
-        ttk.Button(parent, text="Chọn...", command=self._choose_output).grid(row=5, column=2, sticky="ew", padx=(0, 8), pady=5)
+        self._add_label(parent, "Exclude keywords", 6, 0)
+        ttk.Entry(parent, textvariable=self.exclude_keywords_var).grid(row=6, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=5)
 
-        self._add_label(parent, "Tên file template", 6, 0)
-        ttk.Entry(parent, textvariable=self.output_template_var).grid(row=6, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=5)
+        self._add_label(parent, "File output", 7, 0)
+        ttk.Entry(parent, textvariable=self.output_var).grid(row=7, column=1, sticky="ew", padx=(8, 18), pady=5)
+        ttk.Button(parent, text="Chọn...", command=self._choose_output).grid(row=7, column=2, sticky="ew", padx=(0, 8), pady=5)
 
-        self._add_label(parent, "Định dạng", 7, 0)
-        ttk.Combobox(parent, textvariable=self.export_format_var, values=list(crawler.EXPORT_FORMATS), state="readonly").grid(row=7, column=1, sticky="ew", padx=(8, 18), pady=5)
+        self._add_label(parent, "Tên file template", 8, 0)
+        ttk.Entry(parent, textvariable=self.output_template_var).grid(row=8, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=5)
 
-        self._add_label(parent, "Chế độ xuất", 7, 2)
-        ttk.Combobox(parent, textvariable=self.export_mode_var, values=list(crawler.EXPORT_MODES), state="readonly").grid(row=7, column=3, sticky="ew", padx=(8, 0), pady=5)
+        self._add_label(parent, "Định dạng", 9, 0)
+        ttk.Combobox(parent, textvariable=self.export_format_var, values=list(crawler.EXPORT_FORMATS), state="readonly").grid(row=9, column=1, sticky="ew", padx=(8, 18), pady=5)
 
-        self._add_label(parent, "Ghi file", 8, 0)
-        ttk.Combobox(parent, textvariable=self.write_mode_var, values=list(crawler.WRITE_MODES), state="readonly").grid(row=8, column=1, sticky="ew", padx=(8, 18), pady=5)
+        self._add_label(parent, "Chế độ xuất", 9, 2)
+        ttk.Combobox(parent, textvariable=self.export_mode_var, values=list(crawler.EXPORT_MODES), state="readonly").grid(row=9, column=3, sticky="ew", padx=(8, 0), pady=5)
 
-        self._add_label(parent, "Tách file", 8, 2)
-        ttk.Combobox(parent, textvariable=self.split_by_var, values=list(crawler.SPLIT_MODES), state="readonly").grid(row=8, column=3, sticky="ew", padx=(8, 0), pady=5)
+        self._add_label(parent, "Ghi file", 10, 0)
+        ttk.Combobox(parent, textvariable=self.write_mode_var, values=list(crawler.WRITE_MODES), state="readonly").grid(row=10, column=1, sticky="ew", padx=(8, 18), pady=5)
 
-        self._add_label(parent, "Dedupe", 9, 0)
-        ttk.Combobox(parent, textvariable=self.dedupe_mode_var, values=["destination_id", "name_address", "coordinates"], state="readonly").grid(row=9, column=1, sticky="ew", padx=(8, 18), pady=5)
+        self._add_label(parent, "Tách file", 10, 2)
+        ttk.Combobox(parent, textvariable=self.split_by_var, values=list(crawler.SPLIT_MODES), state="readonly").grid(row=10, column=3, sticky="ew", padx=(8, 0), pady=5)
+
+        self._add_label(parent, "Dedupe", 11, 0)
+        ttk.Combobox(parent, textvariable=self.dedupe_mode_var, values=["destination_id", "name_address", "coordinates"], state="readonly").grid(row=11, column=1, sticky="ew", padx=(8, 18), pady=5)
 
         flags = ttk.Frame(parent)
-        flags.grid(row=9, column=2, columnspan=2, sticky="w", padx=(8, 0), pady=5)
+        flags.grid(row=11, column=2, columnspan=2, sticky="w", padx=(8, 0), pady=5)
         ttk.Checkbutton(flags, text="Resume từ file/checkpoint", variable=self.resume_var).grid(row=0, column=0, padx=(0, 18))
         ttk.Checkbutton(flags, text="Chạy ẩn Chrome", variable=self.headless_var).grid(row=0, column=1)
 
         timing = ttk.LabelFrame(parent, text="Delay / timeout / luồng", padding=10)
-        timing.grid(row=10, column=0, columnspan=4, sticky="ew", pady=(12, 0))
+        timing.grid(row=12, column=0, columnspan=4, sticky="ew", pady=(12, 0))
         for column in range(8):
             timing.columnconfigure(column, weight=1)
         labels = [("Delay nơi", self.delay_var), ("Delay cuộn", self.scroll_pause_var), ("Timeout", self.timeout_var), ("Số luồng", self.worker_count_var)]
@@ -397,7 +429,7 @@ class GoogleMapsCrawlerApp:
             ttk.Entry(timing, textvariable=variable, width=12).grid(row=0, column=index * 2 + 1, sticky="ew", padx=(0, 12))
 
         query_frame = ttk.LabelFrame(parent, text="Query preview", padding=10)
-        query_frame.grid(row=11, column=0, columnspan=4, sticky="ew", pady=(12, 0))
+        query_frame.grid(row=13, column=0, columnspan=4, sticky="ew", pady=(12, 0))
         query_frame.columnconfigure(0, weight=1)
         self.query_preview = ttk.Label(query_frame, text="", anchor="w")
         self.query_preview.grid(row=0, column=0, sticky="ew")
@@ -409,7 +441,7 @@ class GoogleMapsCrawlerApp:
             text="Tool không thêm proxy, stealth hay bypass CAPTCHA. Nếu Google chặn, hãy tăng delay, giảm luồng hoặc dùng Places API chính thức.",
             wraplength=980,
         )
-        note.grid(row=12, column=0, columnspan=4, sticky="ew", pady=(14, 0))
+        note.grid(row=14, column=0, columnspan=4, sticky="ew", pady=(14, 0))
 
     def _build_fields_tab(self, parent: ttk.Frame) -> None:
         parent.columnconfigure(0, weight=1)
@@ -491,6 +523,10 @@ class GoogleMapsCrawlerApp:
     def _add_label(self, parent: ttk.Frame, text: str, row: int, column: int) -> None:
         ttk.Label(parent, text=text).grid(row=row, column=column, sticky="w", pady=5)
 
+    def _refresh_limit_state(self) -> None:
+        if hasattr(self, "limit_spinbox"):
+            self.limit_spinbox.configure(state="disabled" if self.all_results_var.get() else "normal")
+
     def _set_all_fields(self, value: bool) -> None:
         for variable in self.field_vars.values():
             variable.set(value)
@@ -503,6 +539,13 @@ class GoogleMapsCrawlerApp:
         if preset in CATEGORY_PRESETS:
             self.multi_types_var.set(", ".join(CATEGORY_PRESETS[preset]))
             self.place_type_var.set(CATEGORY_PRESETS[preset][0])
+
+    def _apply_location_preset(self) -> None:
+        locations = jobs.locations_for_preset(self.location_preset_var.get(), self.multi_locations_var.get())
+        if locations:
+            self.multi_locations_var.set(", ".join(locations))
+            self.location_var.set(locations[0])
+            self._append_log(f"Đã áp dụng vùng {self.location_preset_var.get()}: {len(locations)} vị trí.", "info")
 
     def _refresh_query_preview(self) -> None:
         query = build_query(self.place_type_var.get(), self.keyword_var.get(), self.location_var.get(), self.query_template_var.get())
@@ -532,7 +575,11 @@ class GoogleMapsCrawlerApp:
         webbrowser.open(str(folder.resolve()))
 
     def _single_job_from_config(self, limit_override: int | None = None) -> jobs.CrawlJob:
-        limit = limit_override or parse_positive_int(self.limit_var.get(), "Số lượng")
+        limit = limit_override if limit_override is not None else parse_limit_for_mode(
+            self.limit_var.get(),
+            "Số lượng",
+            self.all_results_var.get(),
+        )
         return jobs.CrawlJob(
             place_type=self.place_type_var.get().strip(),
             keyword=self.keyword_var.get().strip(),
@@ -556,10 +603,12 @@ class GoogleMapsCrawlerApp:
                 place_types=self.multi_types_var.get() or self.place_type_var.get(),
                 keywords=self.keyword_var.get(),
                 locations=self.multi_locations_var.get() or self.location_var.get(),
-                limit=parse_positive_int(self.limit_var.get(), "Số lượng"),
+                limit=parse_limit_for_mode(self.limit_var.get(), "Số lượng", self.all_results_var.get()),
                 query_template=self.query_template_var.get(),
                 output_template=self.output_template_var.get(),
                 export_format=self.export_format_var.get(),
+                location_preset=self.location_preset_var.get(),
+                all_results=self.all_results_var.get(),
             )
         except ValueError as exc:
             messagebox.showerror("Không tạo được job", str(exc))
@@ -633,7 +682,7 @@ class GoogleMapsCrawlerApp:
                 "",
                 "end",
                 iid=str(index),
-                values=(job.status, job.query, job.limit, job.output, job.saved, job.failed),
+                values=(job.status, job.query, format_job_limit(job.limit), job.output, job.saved, job.failed),
             )
 
     def _read_base_options(self, job: jobs.CrawlJob) -> crawler.CrawlOptions:
@@ -671,7 +720,8 @@ class GoogleMapsCrawlerApp:
         try:
             crawl_jobs = [self._single_job_from_config(limit_override=1)] if test_one else (self.job_queue[:] or [self._single_job_from_config()])
             for job in crawl_jobs:
-                parse_positive_int(str(job.limit), "Số lượng")
+                if job.limit < 0:
+                    raise ValueError("Số lượng phải là ALL hoặc lớn hơn 0.")
             job_options = [(job, self._read_base_options(job)) for job in crawl_jobs]
         except ValueError as exc:
             messagebox.showerror("Cấu hình chưa hợp lệ", str(exc))
@@ -826,9 +876,11 @@ class GoogleMapsCrawlerApp:
             "location": self.location_var.get(),
             "multi_types": self.multi_types_var.get(),
             "multi_locations": self.multi_locations_var.get(),
+            "location_preset": self.location_preset_var.get(),
             "query_template": self.query_template_var.get(),
             "exclude_keywords": self.exclude_keywords_var.get(),
             "limit": self.limit_var.get(),
+            "all_results": self.all_results_var.get(),
             "delay": self.delay_var.get(),
             "scroll_pause": self.scroll_pause_var.get(),
             "timeout": self.timeout_var.get(),
@@ -855,6 +907,7 @@ class GoogleMapsCrawlerApp:
             "location": self.location_var,
             "multi_types": self.multi_types_var,
             "multi_locations": self.multi_locations_var,
+            "location_preset": self.location_preset_var,
             "query_template": self.query_template_var,
             "exclude_keywords": self.exclude_keywords_var,
             "limit": self.limit_var,
@@ -877,6 +930,8 @@ class GoogleMapsCrawlerApp:
             self.resume_var.set(bool(settings["resume"]))
         if "headless" in settings:
             self.headless_var.set(bool(settings["headless"]))
+        if "all_results" in settings:
+            self.all_results_var.set(bool(settings["all_results"]))
         for field, selected in dict(settings.get("fields", {})).items():
             if field in self.field_vars:
                 self.field_vars[field].set(bool(selected))

@@ -71,6 +71,11 @@ class GoogleMapsGuiConfigTests(unittest.TestCase):
             Path("data/google_maps_20260628_173045.csv"),
         )
 
+    def test_parse_limit_for_all_results_ignores_number_field(self):
+        self.assertEqual(gui.parse_limit_for_mode("abc", "Số lượng", all_results=True), 0)
+        self.assertEqual(gui.parse_limit_for_mode("12", "Số lượng", all_results=False), 12)
+        self.assertEqual(gui.format_job_limit(0), "ALL")
+
     def test_selected_fields_keeps_schema_order(self):
         values = {
             "rating": True,
@@ -108,6 +113,10 @@ class GoogleMapsGuiConfigTests(unittest.TestCase):
         self.assertIn("Du lich", gui.CATEGORY_PRESETS)
         self.assertIn("An uong", gui.CATEGORY_PRESETS)
 
+    def test_location_presets_are_exposed_to_gui(self):
+        self.assertIn("Toan quoc", gui.LOCATION_PRESETS)
+        self.assertEqual(len(gui.LOCATION_PRESETS["Toan quoc"]), 34)
+
     def test_build_jobs_from_inputs_cross_joins_for_queue(self):
         generated = gui.build_jobs_from_inputs(
             place_types="khách sạn, resort",
@@ -121,6 +130,34 @@ class GoogleMapsGuiConfigTests(unittest.TestCase):
         self.assertEqual(len(generated), 4)
         self.assertEqual(generated[0].query, "khách sạn view biển Đà Nẵng")
         self.assertTrue(generated[0].output.endswith(".csv"))
+
+    def test_build_jobs_from_inputs_expands_location_preset(self):
+        generated = gui.build_jobs_from_inputs(
+            place_types="khach san",
+            keywords="",
+            locations="",
+            limit=5,
+            query_template="{type} {location}",
+            output_template="data/{type}_{location}_{date}.csv",
+            location_preset="Toan quoc",
+        )
+
+        self.assertEqual(len(generated), 34)
+        self.assertEqual(generated[0].limit, 5)
+        self.assertIn("Hà Nội", [job.location for job in generated])
+        self.assertEqual(len({job.output for job in generated}), 34)
+
+    def test_build_jobs_from_inputs_supports_all_results_mode(self):
+        generated = gui.build_jobs_from_inputs(
+            place_types="khach san",
+            keywords="",
+            locations="Cau Giay",
+            limit=0,
+            query_template="{type} {location}",
+            all_results=True,
+        )
+
+        self.assertEqual(generated[0].limit, 0)
 
     def test_filter_and_sort_places_for_preview(self):
         places = [
